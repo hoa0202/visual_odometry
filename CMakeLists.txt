@@ -32,6 +32,7 @@ set(SOURCES
   src/main.cpp
   src/vo_node.cpp
   src/image_processor.cpp
+  src/feature_detector.cpp
 )
 
 # 실행 파일 추가
@@ -58,6 +59,13 @@ install(TARGETS vo_node
 # 헤더 파일 설치
 install(DIRECTORY include/
   DESTINATION include/
+)
+
+# Install launch files
+install(DIRECTORY
+  launch
+  config
+  DESTINATION share/${PROJECT_NAME}
 )
 
 # 패키지 설정 파일 생성

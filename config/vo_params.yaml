@@ -1,0 +1,32 @@
+/**:
+  ros__parameters:
+    # Feature Detector Parameters
+    feature_detector:
+      max_features: 2000
+      scale_factor: 1.2
+      n_levels: 8
+      visualization_type: "points"  # "points" or "rich"
+
+    # Image Processor Parameters
+    image_processor:
+      gaussian_blur_size: 5
+      gaussian_sigma: 1.0
+      enable_histogram_eq: true
+
+    # Camera Parameters (기본값, 실제로는 카메라 info에서 업데이트됨)
+    camera:
+      fx: 525.0
+      fy: 525.0
+      cx: 319.5
+      cy: 239.5
+      width: 640
+      height: 480
+
+    # Visual Odometry Parameters
+    vo:
+      min_feature_distance: 30.0
+      max_feature_distance: 5000.0
+      min_matches: 10
+      ransac_threshold: 3.0
+      keyframe_rotation_threshold: 0.1  # radians
+      keyframe_translation_threshold: 0.1  # meters 
