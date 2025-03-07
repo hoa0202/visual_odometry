@@ -34,7 +34,30 @@ VisualOdometryNode::VisualOdometryNode()
     feature_img_pub_ = this->create_publisher<sensor_msgs::msg::Image>(
         "feature_image", 10);
 
+    // OpenCV 윈도우 생성 및 위치 설정
+    try {
+        if (show_original_) {
+            cv::namedWindow(original_window_name_, cv::WINDOW_AUTOSIZE | cv::WINDOW_KEEPRATIO);
+            cv::moveWindow(original_window_name_, window_pos_x_, window_pos_y_);
+        }
+        if (show_features_) {
+            cv::namedWindow(feature_window_name_, cv::WINDOW_AUTOSIZE | cv::WINDOW_KEEPRATIO);
+            cv::moveWindow(feature_window_name_, 
+                          window_pos_x_ + window_width_ + 30,
+                          window_pos_y_);
+        }
+    } catch (const cv::Exception& e) {
+        RCLCPP_WARN(this->get_logger(), "Failed to create windows: %s", e.what());
+        show_original_ = false;
+        show_features_ = false;
+    }
+
     RCLCPP_INFO(this->get_logger(), "Visual Odometry Node has been initialized");
+}
+
+VisualOdometryNode::~VisualOdometryNode() {
+    if (show_original_) cv::destroyWindow(original_window_name_);
+    if (show_features_) cv::destroyWindow(feature_window_name_);
 }
 
 void VisualOdometryNode::declareParameters()
@@ -49,6 +72,14 @@ void VisualOdometryNode::declareParameters()
     this->declare_parameter("image_processor.gaussian_blur_size", 5);
     this->declare_parameter("image_processor.gaussian_sigma", 1.0);
     this->declare_parameter("image_processor.enable_histogram_eq", true);
+
+    // 시각화 파라미터
+    this->declare_parameter("visualization.window_width", 800);
+    this->declare_parameter("visualization.window_height", 600);
+    this->declare_parameter("visualization.show_original", true);
+    this->declare_parameter("visualization.show_features", true);
+    this->declare_parameter("visualization.window_pos_x", 100);
+    this->declare_parameter("visualization.window_pos_y", 100);
 }
 
 void VisualOdometryNode::applyCurrentParameters() {
@@ -63,6 +94,14 @@ void VisualOdometryNode::applyCurrentParameters() {
     feature_detector_.setMaxFeatures(max_features);
     feature_detector_.setScaleFactor(scale_factor);
     feature_detector_.setNLevels(n_levels);
+
+    // 시각화 파라미터 적용
+    window_width_ = this->get_parameter("visualization.window_width").as_int();
+    window_height_ = this->get_parameter("visualization.window_height").as_int();
+    show_original_ = this->get_parameter("visualization.show_original").as_bool();
+    show_features_ = this->get_parameter("visualization.show_features").as_bool();
+    window_pos_x_ = this->get_parameter("visualization.window_pos_x").as_int();
+    window_pos_y_ = this->get_parameter("visualization.window_pos_y").as_int();
 }
 
 rcl_interfaces::msg::SetParametersResult VisualOdometryNode::onParamChange(
@@ -74,7 +113,7 @@ rcl_interfaces::msg::SetParametersResult VisualOdometryNode::onParamChange(
     for (const auto& param : params) {
         if (param.get_name() == "feature_detector.max_features") {
             feature_detector_.setMaxFeatures(param.as_int());
-            RCLCPP_INFO(this->get_logger(), "Updated max_features to: %d", param.as_int());
+            RCLCPP_INFO(this->get_logger(), "Updated max_features to: %ld", param.as_int());
         }
         else if (param.get_name() == "feature_detector.scale_factor") {
             feature_detector_.setScaleFactor(param.as_double());
@@ -89,6 +128,32 @@ rcl_interfaces::msg::SetParametersResult VisualOdometryNode::onParamChange(
                 cv::DrawMatchesFlags::DRAW_RICH_KEYPOINTS : 
                 cv::DrawMatchesFlags::DEFAULT);
             feature_detector_.setVisualizationFlags(flags);
+        }
+        else if (param.get_name() == "visualization.window_width") {
+            window_width_ = param.as_int();
+        }
+        else if (param.get_name() == "visualization.window_height") {
+            window_height_ = param.as_int();
+        }
+        else if (param.get_name() == "visualization.show_original") {
+            show_original_ = param.as_bool();
+            if (show_original_) {
+                cv::namedWindow(original_window_name_, cv::WINDOW_AUTOSIZE | cv::WINDOW_KEEPRATIO);
+                cv::moveWindow(original_window_name_, window_pos_x_, window_pos_y_);
+            } else {
+                cv::destroyWindow(original_window_name_);
+            }
+        }
+        else if (param.get_name() == "visualization.show_features") {
+            show_features_ = param.as_bool();
+            if (show_features_) {
+                cv::namedWindow(feature_window_name_, cv::WINDOW_AUTOSIZE | cv::WINDOW_KEEPRATIO);
+                cv::moveWindow(feature_window_name_, 
+                             window_pos_x_ + window_width_ + 30,
+                             window_pos_y_);
+            } else {
+                cv::destroyWindow(feature_window_name_);
+            }
         }
     }
 
@@ -150,12 +215,45 @@ void VisualOdometryNode::rgbCallback(const sensor_msgs::msg::Image::SharedPtr ms
         
         // 특징점 검출
         Features features = feature_detector_.detectFeatures(processed.gray);
-        
-        // 결과 시각화 및 퍼블리시
-        sensor_msgs::msg::Image::SharedPtr feature_msg = 
-            cv_bridge::CvImage(msg->header, "bgr8", features.visualization)
-            .toImageMsg();
-        feature_img_pub_->publish(*feature_msg);
+
+        // 시각화 시도
+        try {
+            // 원본 이미지 표시
+            if (show_original_) {
+                cv::Mat resized_original;
+                cv::resize(bgr_image, resized_original, 
+                          cv::Size(window_width_, window_height_));
+                cv::imshow(original_window_name_, resized_original);
+            }
+            
+            // 결과 시각화 - 크기 조절 후 표시
+            if (show_features_) {
+                cv::Mat resized_vis;
+                cv::resize(features.visualization, resized_vis, 
+                          cv::Size(window_width_, window_height_));
+                cv::imshow(feature_window_name_, resized_vis);
+            }
+
+            // 키 입력 처리 (둘 중 하나라도 표시 중이면)
+            if (show_original_ || show_features_) {
+                cv::waitKey(1);
+            }
+        } catch (const cv::Exception& e) {
+            if (show_original_ || show_features_) {
+                RCLCPP_WARN_THROTTLE(this->get_logger(),
+                                   *this->get_clock(),
+                                   5000,  // 5초마다 경고
+                                   "Failed to show images: %s", e.what());
+            }
+        }
+
+        // 토픽 퍼블리시 (선택적)
+        if (feature_img_pub_->get_subscription_count() > 0) {
+            sensor_msgs::msg::Image::SharedPtr feature_msg = 
+                cv_bridge::CvImage(msg->header, "bgr8", features.visualization)
+                .toImageMsg();
+            feature_img_pub_->publish(*feature_msg);
+        }
 
         RCLCPP_INFO_THROTTLE(this->get_logger(), 
                             *this->get_clock(), 

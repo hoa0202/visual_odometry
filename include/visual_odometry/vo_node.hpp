@@ -3,6 +3,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/msg/camera_info.hpp>
+#include <opencv2/highgui.hpp>
 #include "visual_odometry/image_processor.hpp"
 #include "visual_odometry/feature_detector.hpp"
 #include "visual_odometry/types.hpp"
@@ -12,7 +13,7 @@ namespace vo {
 class VisualOdometryNode : public rclcpp::Node {
 public:
     explicit VisualOdometryNode();
-    ~VisualOdometryNode() = default;
+    virtual ~VisualOdometryNode();
 
 private:
     // 파라미터 관련 메서드들
@@ -48,6 +49,16 @@ private:
     cv::Mat previous_frame_;
     cv::Mat current_depth_;
     cv::Mat previous_depth_;
+
+    // 시각화 관련 변수들
+    bool show_original_{true};
+    bool show_features_{true};
+    int window_width_{800};
+    int window_height_{600};
+    int window_pos_x_{100};
+    int window_pos_y_{100};
+    const std::string original_window_name_{"Original Image"};
+    const std::string feature_window_name_{"Feature Detection Result"};
 };
 
 } // namespace vo 

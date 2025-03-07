@@ -7,6 +7,17 @@
       n_levels: 8
       visualization_type: "points"  # "points" or "rich"
 
+    # Visualization Parameters
+    visualization:
+      window_width: 800    # 윈도우 너비
+      window_height: 600   # 윈도우 높이
+      show_original: true  # 원본 이미지 표시 여부
+      show_features: false  # 특징점 이미지 표시 여부
+      original_window_name: "Original Image"
+      feature_window_name: "Feature Detection Result"
+      window_pos_x: 100    # 첫 번째 윈도우 x 위치
+      window_pos_y: 100    # 첫 번째 윈도우 y 위치
+
     # Image Processor Parameters
     image_processor:
       gaussian_blur_size: 5
