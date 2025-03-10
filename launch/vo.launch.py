@@ -33,6 +33,7 @@ def generate_launch_description():
             executable='vo_node',
             name='visual_odometry_node',
             output='screen',
+            # arguments=['--ros-args', '--log-level', 'debug'],
             parameters=[params_path, {
                 'use_sim_time': use_sim_time,
             }],

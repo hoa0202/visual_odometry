@@ -7,6 +7,8 @@
 #include "visual_odometry/image_processor.hpp"
 #include "visual_odometry/feature_detector.hpp"
 #include "visual_odometry/types.hpp"
+#include <thread>
+#include <mutex>
 
 namespace vo {
 
@@ -45,6 +47,7 @@ private:
 
     // 상태 변수들
     bool camera_info_received_{false};
+    bool features_detected_{false};
     cv::Mat current_frame_;
     cv::Mat previous_frame_;
     cv::Mat current_depth_;
@@ -59,6 +62,18 @@ private:
     int window_pos_y_{100};
     const std::string original_window_name_{"Original Image"};
     const std::string feature_window_name_{"Feature Detection Result"};
+
+    std::thread display_thread_;
+    std::mutex frame_mutex_;
+    cv::Mat display_frame_;
+    bool should_exit_{false};
+    
+    // FPS 계산을 위한 변수들
+    rclcpp::Time last_fps_time_{0};
+    int fps_frame_count_{0};
+    double fps_total_process_time_{0.0};
+    
+    void displayLoop();
 };
 
 } // namespace vo 

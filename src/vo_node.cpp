@@ -17,9 +17,12 @@ VisualOdometryNode::VisualOdometryNode()
     param_callback_handle_ = this->add_on_set_parameters_callback(
         std::bind(&VisualOdometryNode::onParamChange, this, std::placeholders::_1));
 
+    // QoS 프로파일 설정
+    auto qos = rclcpp::QoS(1).best_effort().durability_volatile();
+
     // Subscribers
     rgb_sub_ = this->create_subscription<sensor_msgs::msg::Image>(
-        "/zed/zed_node/rgb/image_rect_color", 10,
+        "rgb_image", qos,
         std::bind(&VisualOdometryNode::rgbCallback, this, std::placeholders::_1));
 
     depth_sub_ = this->create_subscription<sensor_msgs::msg::Image>(
@@ -102,6 +105,14 @@ void VisualOdometryNode::applyCurrentParameters() {
     show_features_ = this->get_parameter("visualization.show_features").as_bool();
     window_pos_x_ = this->get_parameter("visualization.window_pos_x").as_int();
     window_pos_y_ = this->get_parameter("visualization.window_pos_y").as_int();
+
+    // 시각화 타입 설정
+    std::string viz_type = this->get_parameter("feature_detector.visualization_type").as_string();
+    feature_detector_.setVisualizationType(viz_type);
+    
+    RCLCPP_INFO(this->get_logger(), 
+                "Applied visualization type: %s", 
+                viz_type.c_str());
 }
 
 rcl_interfaces::msg::SetParametersResult VisualOdometryNode::onParamChange(
@@ -122,12 +133,10 @@ rcl_interfaces::msg::SetParametersResult VisualOdometryNode::onParamChange(
             feature_detector_.setNLevels(param.as_int());
         }
         else if (param.get_name() == "feature_detector.visualization_type") {
-            std::string viz_type = param.as_string();
-            int flags = static_cast<int>(
-                viz_type == "rich" ? 
-                cv::DrawMatchesFlags::DRAW_RICH_KEYPOINTS : 
-                cv::DrawMatchesFlags::DEFAULT);
-            feature_detector_.setVisualizationFlags(flags);
+            feature_detector_.setVisualizationType(param.as_string());
+            RCLCPP_INFO(this->get_logger(), 
+                       "Updated visualization type to: %s", 
+                       param.as_string().c_str());
         }
         else if (param.get_name() == "visualization.window_width") {
             window_width_ = param.as_int();
@@ -195,71 +204,136 @@ void VisualOdometryNode::rgbCallback(const sensor_msgs::msg::Image::SharedPtr ms
     }
 
     try {
-        // BGRA8 인코딩으로 변환
-        cv_bridge::CvImageConstPtr cv_ptr = cv_bridge::toCvShare(msg, sensor_msgs::image_encodings::BGRA8);
-        
-        // BGRA에서 BGR로 변환
-        cv::Mat bgr_image;
-        cv::cvtColor(cv_ptr->image, bgr_image, cv::COLOR_BGRA2BGR);
+        auto frame_start_time = this->now();
 
-        // 이전 프레임 저장
-        if (!current_frame_.empty()) {
-            current_frame_.copyTo(previous_frame_);
+        // 이미지 직접 변환 (jpeg 포맷 자동 처리)
+        cv_bridge::CvImageConstPtr cv_ptr = cv_bridge::toCvShare(msg);
+        
+        // 이미지 크기 확인 및 리사이즈 (한 번의 연산으로)
+        static cv::Mat working_frame;  // 정적 버퍼
+        if (cv_ptr->image.rows > 720) {
+            if (working_frame.empty() || 
+                working_frame.size() != cv::Size(cv_ptr->image.cols * 720.0 / cv_ptr->image.rows, 720)) {
+                working_frame.create(720, cv_ptr->image.cols * 720.0 / cv_ptr->image.rows, cv_ptr->image.type());
+            }
+            cv::resize(cv_ptr->image, working_frame, working_frame.size(), 0, 0, cv::INTER_AREA);
+        } else {
+            working_frame = cv_ptr->image;
         }
-        
-        // 현재 프레임 저장
-        bgr_image.copyTo(current_frame_);
 
-        // 이미지 처리
-        ProcessedImages processed = image_processor_.process(current_frame_);
-        
-        // 특징점 검출
-        Features features = feature_detector_.detectFeatures(processed.gray);
+        // 특징점 검출 (필요한 경우만)
+        Features features;
+        features_detected_ = false;  // 상태 업데이트
+        if (show_features_ || feature_img_pub_->get_subscription_count() > 0) {
+            static cv::Mat gray_buffer;  // 그레이스케일 변환용 정적 버퍼
+            features = feature_detector_.detectFeatures(
+                image_processor_.process(working_frame, gray_buffer).gray);
+            features_detected_ = !features.keypoints.empty();
+        }
 
-        // 시각화 시도
-        try {
-            // 원본 이미지 표시
-            if (show_original_) {
-                cv::Mat resized_original;
-                cv::resize(bgr_image, resized_original, 
-                          cv::Size(window_width_, window_height_));
-                cv::imshow(original_window_name_, resized_original);
-            }
-            
-            // 결과 시각화 - 크기 조절 후 표시
-            if (show_features_) {
-                cv::Mat resized_vis;
-                cv::resize(features.visualization, resized_vis, 
-                          cv::Size(window_width_, window_height_));
-                cv::imshow(feature_window_name_, resized_vis);
-            }
-
-            // 키 입력 처리 (둘 중 하나라도 표시 중이면)
-            if (show_original_ || show_features_) {
+        // 디스플레이 업데이트 (30Hz로 제한)
+        static rclcpp::Time last_display_time = this->now();
+        if ((this->now() - last_display_time).seconds() >= 1.0/30.0) {
+            try {
+                static cv::Mat display_buffer;  // 디스플레이용 정적 버퍼
+                
+                if (show_original_) {
+                    if (working_frame.rows != window_height_ || 
+                        working_frame.cols != window_width_) {
+                        cv::resize(working_frame, display_buffer, 
+                                 cv::Size(window_width_, window_height_), 
+                                 0, 0, cv::INTER_NEAREST);
+                        cv::imshow(original_window_name_, display_buffer);
+                    } else {
+                        cv::imshow(original_window_name_, working_frame);
+                    }
+                }
+                
+                if (show_features_ && !features.visualization.empty()) {
+                    cv::resize(features.visualization, display_buffer, 
+                             cv::Size(window_width_, window_height_), 
+                             0, 0, cv::INTER_NEAREST);
+                    cv::imshow(feature_window_name_, display_buffer);
+                }
+                
                 cv::waitKey(1);
-            }
-        } catch (const cv::Exception& e) {
-            if (show_original_ || show_features_) {
+                last_display_time = this->now();
+            } catch (const cv::Exception& e) {
                 RCLCPP_WARN_THROTTLE(this->get_logger(),
                                    *this->get_clock(),
-                                   5000,  // 5초마다 경고
-                                   "Failed to show images: %s", e.what());
+                                   5000,
+                                   "Display error: %s", e.what());
             }
         }
 
-        // 토픽 퍼블리시 (선택적)
-        if (feature_img_pub_->get_subscription_count() > 0) {
+        // 현재 프레임 저장 (필요한 경우만, 메모리 재사용)
+        if (features_detected_) {
+            if (previous_frame_.empty() || 
+                previous_frame_.size() != working_frame.size()) {
+                previous_frame_.create(working_frame.size(), working_frame.type());
+                current_frame_.create(working_frame.size(), working_frame.type());
+            }
+            current_frame_.copyTo(previous_frame_);
+            working_frame.copyTo(current_frame_);
+        }
+
+        // 실제 처리 결과 퍼블리시
+        if (feature_img_pub_->get_subscription_count() > 0 && !features.visualization.empty()) {
             sensor_msgs::msg::Image::SharedPtr feature_msg = 
                 cv_bridge::CvImage(msg->header, "bgr8", features.visualization)
                 .toImageMsg();
             feature_img_pub_->publish(*feature_msg);
         }
 
-        RCLCPP_INFO_THROTTLE(this->get_logger(), 
-                            *this->get_clock(), 
-                            1000,
-                            "Detected %zu features", 
-                            features.keypoints.size());
+        // 프레임 처리 시간 계산
+        auto frame_end_time = this->now();
+        double process_time = (frame_end_time - frame_start_time).seconds() * 1000.0;  // ms
+        
+        // FPS 계산을 위한 누적
+        fps_frame_count_++;
+        fps_total_process_time_ += process_time;
+        
+        // 1초마다 성능 통계 출력
+        if (last_fps_time_.get_clock_type() == RCL_ROS_TIME) {  // 초기화 확인
+            double elapsed_time = (frame_end_time - last_fps_time_).seconds();
+            if (elapsed_time >= 1.0) {
+                double fps = fps_frame_count_ / elapsed_time;
+                double avg_process_time = fps_total_process_time_ / fps_frame_count_;
+                
+                RCLCPP_INFO(this->get_logger(),
+                           "Performance Stats:\n"
+                           "  FPS: %.1f\n"
+                           "  Process Time: %.1f ms (avg)\n"
+                           "  Features: %zu\n"
+                           "  Frame Size: %dx%d\n"
+                           "  Total Frames: %d\n"
+                           "  Elapsed Time: %.3f s",
+                           fps,
+                           avg_process_time,
+                           features.keypoints.size(),
+                           working_frame.cols,
+                           working_frame.rows,
+                           fps_frame_count_,
+                           elapsed_time);
+
+                // 통계 리셋
+                fps_frame_count_ = 0;
+                fps_total_process_time_ = 0.0;
+                last_fps_time_ = frame_end_time;
+            }
+        } else {
+            last_fps_time_ = frame_end_time;  // 첫 프레임에서 초기화
+        }
+
+        // 개별 프레임 처리 시간 로깅 (5초마다)
+        RCLCPP_DEBUG_THROTTLE(this->get_logger(),
+                            *this->get_clock(),
+                            5000,
+                            "Current frame timing:\n"
+                            "  Process time: %.1f ms\n"
+                            "  Image timestamp: %.3f",
+                            process_time,
+                            msg->header.stamp.sec + msg->header.stamp.nanosec * 1e-9);
     }
     catch (const cv::Exception& e) {
         RCLCPP_ERROR(this->get_logger(), "OpenCV error: %s", e.what());
@@ -271,31 +345,27 @@ void VisualOdometryNode::rgbCallback(const sensor_msgs::msg::Image::SharedPtr ms
 
 void VisualOdometryNode::depthCallback(const sensor_msgs::msg::Image::SharedPtr msg)
 {
-    if (!camera_info_received_) {
-        return;
+    if (!camera_info_received_ || !features_detected_) {
+        return;  // 특징점이 검출된 경우에만 처리
     }
 
     try {
-        cv_bridge::CvImageConstPtr cv_ptr = cv_bridge::toCvShare(msg, sensor_msgs::image_encodings::TYPE_16UC1);
+        cv_bridge::CvImageConstPtr cv_ptr = cv_bridge::toCvShare(msg);
         
-        if (!current_depth_.empty()) {
-            current_depth_.copyTo(previous_depth_);
+        if (current_depth_.empty() || 
+            current_depth_.size() != cv_ptr->image.size()) {
+            current_depth_.create(cv_ptr->image.size(), cv_ptr->image.type());
+            previous_depth_.create(cv_ptr->image.size(), cv_ptr->image.type());
         }
         
+        current_depth_.copyTo(previous_depth_);
         cv_ptr->image.copyTo(current_depth_);
-
-        RCLCPP_INFO_THROTTLE(this->get_logger(), 
-                            *this->get_clock(), 
-                            1000,
-                            "Depth image processed. Size: %dx%d", 
-                            current_depth_.cols, 
-                            current_depth_.rows);
+        
+        RCLCPP_INFO(this->get_logger(), "Depth image processed. Size: %dx%d",
+                    current_depth_.cols, current_depth_.rows);
     }
     catch (const cv::Exception& e) {
-        RCLCPP_ERROR(this->get_logger(), "OpenCV error: %s", e.what());
-    }
-    catch (const std::exception& e) {
-        RCLCPP_ERROR(this->get_logger(), "Standard exception: %s", e.what());
+        RCLCPP_ERROR(this->get_logger(), "OpenCV error in depth callback: %s", e.what());
     }
 }
 

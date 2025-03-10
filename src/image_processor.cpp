@@ -6,15 +6,32 @@ namespace vo {
 ImageProcessor::ImageProcessor() {}
 
 ProcessedImages ImageProcessor::process(const cv::Mat& input_frame) {
+    cv::Mat gray_buffer;
+    return process(input_frame, gray_buffer);
+}
+
+ProcessedImages ImageProcessor::process(const cv::Mat& input_frame, cv::Mat& gray_buffer) {
     ProcessedImages result;
     
-    result.gray = convertToGray(input_frame);
-    result.enhanced = enhanceImage(result.gray);
-    result.denoised = denoiseImage(result.enhanced);
-    result.masked = result.denoised.clone();
-    cv::Mat mask = createMask(result.denoised.size());
-    result.denoised.copyTo(result.masked, mask);
-    
+    // 그레이스케일 변환 (버퍼 재사용)
+    if (gray_buffer.empty() || gray_buffer.size() != input_frame.size()) {
+        gray_buffer.create(input_frame.size(), CV_8UC1);
+    }
+    cv::cvtColor(input_frame, gray_buffer, cv::COLOR_BGR2GRAY);
+    result.gray = gray_buffer;
+
+    // 히스토그램 평활화 (필요한 경우)
+    if (enable_histogram_eq_) {
+        cv::equalizeHist(result.gray, result.gray);
+    }
+
+    // 가우시안 블러 (필요한 경우)
+    if (gaussian_blur_size_ > 0) {
+        cv::GaussianBlur(result.gray, result.gray, 
+                        cv::Size(gaussian_blur_size_, gaussian_blur_size_),
+                        gaussian_sigma_);
+    }
+
     return result;
 }
 

@@ -5,14 +5,14 @@
       max_features: 2000
       scale_factor: 1.2
       n_levels: 8
-      visualization_type: "points"  # "points" or "rich"
+      visualization_type: "points"  # "points"에서 "rich"로 변경
 
     # Visualization Parameters
     visualization:
       window_width: 800    # 윈도우 너비
       window_height: 600   # 윈도우 높이
       show_original: true  # 원본 이미지 표시 여부
-      show_features: false  # 특징점 이미지 표시 여부
+      show_features: true  # 특징점 이미지 표시 여부
       original_window_name: "Original Image"
       feature_window_name: "Feature Detection Result"
       window_pos_x: 100    # 첫 번째 윈도우 x 위치
@@ -20,9 +20,9 @@
 
     # Image Processor Parameters
     image_processor:
-      gaussian_blur_size: 5
+      gaussian_blur_size: 0
       gaussian_sigma: 1.0
-      enable_histogram_eq: true
+      enable_histogram_eq: false
 
     # Camera Parameters (기본값, 실제로는 카메라 info에서 업데이트됨)
     camera:

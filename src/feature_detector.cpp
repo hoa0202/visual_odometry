@@ -9,30 +9,30 @@ FeatureDetector::FeatureDetector() {
     updateDetector();
 }
 
-Features FeatureDetector::detectFeatures(const cv::Mat& image) {
-    Features features;
+Features FeatureDetector::detectFeatures(const cv::Mat& gray_image) {
+    Features result;
     
-    detector_->detectAndCompute(
-        image, 
-        cv::Mat(), 
-        features.keypoints,
-        features.descriptors
-    );
-
-    features.visualization = image.clone();
-    if (image.channels() == 1) {
-        cv::cvtColor(image, features.visualization, cv::COLOR_GRAY2BGR);
+    // 특징점 검출
+    detector_->detect(gray_image, result.keypoints);
+    
+    // 최대 특징점 수 제한
+    if (static_cast<int>(result.keypoints.size()) > max_features_) {
+        result.keypoints.resize(max_features_);
     }
     
-    cv::drawKeypoints(
-        features.visualization,
-        features.keypoints,
-        features.visualization,
-        cv::Scalar(0, 255, 0),
-        static_cast<cv::DrawMatchesFlags>(visualization_flags_)
-    );
-
-    return features;
+    // 시각화
+    result.visualization = gray_image.clone();
+    if (gray_image.channels() == 1) {
+        cv::cvtColor(gray_image, result.visualization, cv::COLOR_GRAY2BGR);
+    }
+    
+    cv::drawKeypoints(result.visualization, 
+                     result.keypoints, 
+                     result.visualization,
+                     cv::Scalar(0, 255, 0),  // 녹색
+                     static_cast<cv::DrawMatchesFlags>(visualization_flags_));
+    
+    return result;
 }
 
 void FeatureDetector::setMaxFeatures(int max_features) {
@@ -54,8 +54,11 @@ void FeatureDetector::setNLevels(int n_levels) {
     updateDetector();
 }
 
-void FeatureDetector::setVisualizationFlags(int flags) {
-    visualization_flags_ = flags;
+void FeatureDetector::setVisualizationType(const std::string& type) {
+    visualization_flags_ = static_cast<int>(
+        type == "rich" ? 
+        cv::DrawMatchesFlags::DRAW_RICH_KEYPOINTS : 
+        cv::DrawMatchesFlags::DEFAULT);
 }
 
 void FeatureDetector::updateDetector() {
