@@ -14,18 +14,9 @@ def generate_launch_description():
     params_path = PathJoinSubstitution(
         [pkg_share, 'config', 'vo_params.yaml'])
     
-    # Launch Arguments
-    use_sim_time = LaunchConfiguration('use_sim_time', default='false')
-    
     return LaunchDescription([
         # DISPLAY 환경 변수 설정
         SetEnvironmentVariable('DISPLAY', ':0'),
-
-        # Declare launch arguments
-        DeclareLaunchArgument(
-            'use_sim_time',
-            default_value='false',
-            description='Use simulation clock if true'),
 
         # Visual Odometry Node
         Node(
@@ -33,15 +24,6 @@ def generate_launch_description():
             executable='vo_node',
             name='visual_odometry_node',
             output='screen',
-            # arguments=['--ros-args', '--log-level', 'debug'],
-            parameters=[params_path, {
-                'use_sim_time': use_sim_time,
-            }],
-            remappings=[
-                # ZED 카메라 토픽 리매핑
-                ('rgb_image', '/zed/zed_node/rgb/image_rect_color'),
-                ('depth_image', '/zed/zed_node/depth/depth_registered'),
-                ('camera_info', '/zed/zed_node/rgb/camera_info'),
-            ]
+            parameters=[params_path]
         )
     ]) 

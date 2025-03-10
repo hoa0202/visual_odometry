@@ -1,6 +1,7 @@
 #pragma once
 
 #include <rclcpp/rclcpp.hpp>
+#include <rclcpp/node_options.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/msg/camera_info.hpp>
 #include <opencv2/highgui.hpp>
@@ -9,6 +10,10 @@
 #include "visual_odometry/types.hpp"
 #include <thread>
 #include <mutex>
+#include "visual_odometry/zed_interface.hpp"
+#include <deque>
+#include <queue>
+#include <condition_variable>
 
 namespace vo {
 
@@ -73,7 +78,49 @@ private:
     int fps_frame_count_{0};
     double fps_total_process_time_{0.0};
     
+    // ZED 인터페이스
+    std::unique_ptr<ZEDInterface> zed_interface_;
+    std::string input_source_{"ros2"};
+    
+    // 이미지 획득 메서드
+    bool getImages(cv::Mat& rgb, cv::Mat& depth);
+    
     void displayLoop();
+
+    // ZED SDK 관련
+    rclcpp::TimerBase::SharedPtr zed_timer_;
+    void zedTimerCallback();
+    void processImages(const cv::Mat& rgb, const cv::Mat& depth);
+
+    cv::Mat display_frame_original_;  // 원본 이미지용
+    cv::Mat display_frame_features_;  // 특징점 이미지용
+
+    // 이미지 처리를 위한 버퍼들
+    cv::Mat resized_frame_;
+    cv::Mat gray_buffer_;
+    cv::Mat resized_original_;
+    cv::Mat resized_features_;
+
+    // 타이밍 측정을 위한 변수들
+    rclcpp::Time start_time_;
+    rclcpp::Time resize_start_;
+    rclcpp::Time feature_start_;
+    rclcpp::Time viz_start_;
+
+    // FPS 측정을 위한 변수들
+    std::deque<double> original_frame_times_;  // 원본 이미지용
+    std::deque<double> feature_frame_times_;   // 특징점 검출용
+    rclcpp::Time last_fps_print_time_;
+    double original_fps_;
+    double feature_fps_;
+    int fps_window_size_;
+    double zed_acquisition_time_;
+
+    std::queue<std::pair<cv::Mat, cv::Mat>> image_queue_;
+    std::mutex image_queue_mutex_;
+    std::condition_variable image_ready_;
+    std::thread processing_thread_;
+    void processingLoop();
 };
 
 } // namespace vo 

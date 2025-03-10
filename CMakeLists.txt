@@ -1,6 +1,10 @@
 cmake_minimum_required(VERSION 3.8)
 project(visual_odometry)
 
+# CUDA 설정 추가
+find_package(CUDA REQUIRED)
+include_directories(${CUDA_INCLUDE_DIRS})
+
 # 컴파일러 설정
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
@@ -20,11 +24,14 @@ find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(image_transport REQUIRED)
+find_package(ZED 3 REQUIRED)
 
 # 헤더 파일 포함 디렉토리 설정
 include_directories(
   include
   ${OpenCV_INCLUDE_DIRS}
+  ${CUDA_INCLUDE_DIRS}
+  ${ZED_INCLUDE_DIRS}
 )
 
 # 소스 파일 목록
@@ -33,6 +40,7 @@ set(SOURCES
   src/vo_node.cpp
   src/image_processor.cpp
   src/feature_detector.cpp
+  src/zed_interface.cpp
 )
 
 # 실행 파일 추가
@@ -41,6 +49,8 @@ add_executable(vo_node ${SOURCES})
 # 의존성 링크
 target_link_libraries(vo_node
   ${OpenCV_LIBRARIES}
+  ${ZED_LIBRARIES}
+  ${CUDA_LIBRARIES}
 )
 
 # ament 의존성 추가

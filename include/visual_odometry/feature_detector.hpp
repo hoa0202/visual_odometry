@@ -23,11 +23,12 @@ private:
     // detector 업데이트 메서드
     void updateDetector();
 
-    cv::Ptr<cv::Feature2D> detector_;
-    int max_features_{10000};
-    float scale_factor_{1.2f};
-    int n_levels_{8};
-    int visualization_flags_{static_cast<int>(cv::DrawMatchesFlags::DEFAULT)};
+    cv::Ptr<cv::ORB> detector_;
+    int max_features_ = 2000;
+    float scale_factor_ = 1.2f;
+    int n_levels_ = 8;
+    int visualization_flags_ = static_cast<int>(cv::DrawMatchesFlags::DEFAULT);
+    bool visualization_needed_ = true;
 };
 
 } // namespace vo 

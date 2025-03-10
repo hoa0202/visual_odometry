@@ -1,5 +1,21 @@
 /**:
   ros__parameters:
+    # Input Source Settings
+    input:
+      source: "ros2"  # "ros2" 또는 "zed_sdk"
+      zed:
+        serial_number: 42384922
+        resolution: "HD1080"  # HD2K, HD1080, HD720
+        fps: 60
+        depth_mode: "ULTRA"  # PERFORMANCE, QUALITY, ULTRA
+        
+    # Topic Settings (ROS2 source 사용시)
+    topics:
+      rgb_image: "/zed/zed_node/rgb/image_rect_color"
+      depth_image: "/zed/zed_node/depth/depth_registered"
+      camera_info: "/zed/zed_node/rgb/camera_info"
+      feature_image: "feature_image"  # 발행할 토픽
+      
     # Feature Detector Parameters
     feature_detector:
       max_features: 2000
