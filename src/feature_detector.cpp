@@ -35,6 +35,9 @@ Features FeatureDetector::detectFeatures(const cv::Mat& gray) {
     
     features.keypoints = keypoints;
     
+    // 디스크립터 계산 추가
+    detector_->compute(gray, features.keypoints, features.descriptors);
+    
     // 시각화는 필요한 경우만
     if (visualization_needed_) {
         cv::Mat vis = cv::Mat::zeros(gray.size(), CV_8UC3);
@@ -85,6 +88,46 @@ void FeatureDetector::updateDetector() {
         scale_factor_,     // 스케일 팩터
         n_levels_          // 피라미드 레벨 수
     );
+}
+
+FeatureMatches FeatureDetector::matchFeatures(
+    const Features& prev_features, 
+    const Features& curr_features) {
+    
+    static FeatureMatches matches_result;
+    matches_result.matches.clear();
+    matches_result.prev_points.clear();
+    matches_result.curr_points.clear();
+    
+    if (prev_features.keypoints.empty() || curr_features.keypoints.empty()) {
+        return matches_result;
+    }
+
+    static std::vector<std::vector<cv::DMatch>> knn_matches;
+    knn_matches.clear();
+    
+    // 직접 Hamming 매칭 수행
+    matcher_->knnMatch(prev_features.descriptors,
+                      curr_features.descriptors,
+                      knn_matches, 2);
+
+    matches_result.matches.reserve(knn_matches.size());
+    matches_result.prev_points.reserve(knn_matches.size());
+    matches_result.curr_points.reserve(knn_matches.size());
+
+    for (const auto& knn_match : knn_matches) {
+        if (knn_match.size() < 2) continue;
+        
+        if (knn_match[0].distance < ratio_threshold_ * knn_match[1].distance) {
+            matches_result.matches.push_back(knn_match[0]);
+            matches_result.prev_points.push_back(
+                prev_features.keypoints[knn_match[0].queryIdx].pt);
+            matches_result.curr_points.push_back(
+                curr_features.keypoints[knn_match[0].trainIdx].pt);
+        }
+    }
+
+    return matches_result;
 }
 
 } // namespace vo 

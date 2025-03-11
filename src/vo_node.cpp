@@ -118,6 +118,7 @@ void VisualOdometryNode::declareParameters()
     this->declare_parameter("visualization.show_features", true);
     this->declare_parameter("visualization.window_pos_x", 100);
     this->declare_parameter("visualization.window_pos_y", 100);
+    this->declare_parameter("visualization.show_matches", false);
 
     // 토픽 파라미터 선언
     this->declare_parameter("topics.rgb_image", "/zed/zed_node/rgb/image_rect_color");
@@ -134,6 +135,10 @@ void VisualOdometryNode::declareParameters()
 
     // FPS 윈도우 크기를 60으로 변경
     this->declare_parameter("fps_window_size", 60);  // 30에서 60으로 수정
+
+    // 파라미터 값 로깅
+    show_matches_ = this->get_parameter("visualization.show_matches").as_bool();
+    RCLCPP_INFO(this->get_logger(), "Initialized show_matches_: %s", show_matches_ ? "true" : "false");
 }
 
 void VisualOdometryNode::applyCurrentParameters() {
@@ -142,7 +147,12 @@ void VisualOdometryNode::applyCurrentParameters() {
     double scale_factor = this->get_parameter("feature_detector.scale_factor").as_double();
     int n_levels = this->get_parameter("feature_detector.n_levels").as_int();
     
-    RCLCPP_INFO(this->get_logger(), "Applying parameters: max_features=%d, scale_factor=%.2f, n_levels=%d",
+    // Feature Detector 파라미터 로깅
+    RCLCPP_INFO(this->get_logger(), 
+                "Feature Detector Parameters:"
+                "\n  - max_features: %d"
+                "\n  - scale_factor: %.2f"
+                "\n  - n_levels: %d",
                 max_features, scale_factor, n_levels);
     
     feature_detector_.setMaxFeatures(max_features);
@@ -154,15 +164,30 @@ void VisualOdometryNode::applyCurrentParameters() {
     window_height_ = this->get_parameter("visualization.window_height").as_int();
     show_original_ = this->get_parameter("visualization.show_original").as_bool();
     show_features_ = this->get_parameter("visualization.show_features").as_bool();
+    show_matches_ = this->get_parameter("visualization.show_matches").as_bool();
     window_pos_x_ = this->get_parameter("visualization.window_pos_x").as_int();
     window_pos_y_ = this->get_parameter("visualization.window_pos_y").as_int();
+
+    // 시각화 파라미터 로깅
+    RCLCPP_INFO(this->get_logger(), 
+                "Visualization Parameters:"
+                "\n  - window_size: %dx%d"
+                "\n  - window_position: (%d, %d)"
+                "\n  - show_original: %s"
+                "\n  - show_features: %s"
+                "\n  - show_matches: %s",
+                window_width_, window_height_,
+                window_pos_x_, window_pos_y_,
+                show_original_ ? "true" : "false",
+                show_features_ ? "true" : "false",
+                show_matches_ ? "true" : "false");
 
     // 시각화 타입 설정
     std::string viz_type = this->get_parameter("feature_detector.visualization_type").as_string();
     feature_detector_.setVisualizationType(viz_type);
     
     RCLCPP_INFO(this->get_logger(), 
-                "Applied visualization type: %s", 
+                "Visualization Type: %s", 
                 viz_type.c_str());
 
     // 입력 소스 설정
@@ -352,162 +377,129 @@ void VisualOdometryNode::processImages(const cv::Mat& rgb, const cv::Mat& depth)
     try {
         auto start_time = std::chrono::steady_clock::now();
         
-        // const 참조를 피하기 위해 작업용 변수 사용
-        cv::Mat working_frame;
-        if (rgb.rows <= 720) {
-            working_frame = rgb.clone();  // 복사본 생성
-        } else {
-            double scale = 720.0 / rgb.rows;
-            int new_width = static_cast<int>(rgb.cols * scale);
-            
-            if (resized_frame_.empty() || 
-                resized_frame_.size() != cv::Size(new_width, 720)) {
-                resized_frame_.create(720, new_width, rgb.type());
+        // 작업용 이미지 준비 (resize로 메모리 사용 줄임)
+        static cv::Mat working_frame;  // 정적 할당으로 메모리 재사용
+        cv::resize(rgb, working_frame, cv::Size(), 0.5, 0.5);  // 크기 줄임
+        
+        static cv::Mat gray;  // 그레이스케일 버퍼 재사용
+        cv::cvtColor(working_frame, gray, cv::COLOR_BGR2GRAY);
+        
+        // 특징점 검출
+        Features curr_features = feature_detector_.detectFeatures(gray);
+        
+        // 매칭이 활성화된 경우에만 매칭 관련 처리 수행
+        if (show_matches_) {
+            if (!first_frame_ && !prev_features_.keypoints.empty()) {
+                FeatureMatches matches = feature_detector_.matchFeatures(
+                    prev_features_, curr_features);
+                
+                if (!matches.matches.empty()) {
+                    static cv::Mat match_vis;
+                    cv::drawMatches(prev_frame_, prev_features_.keypoints,
+                                   working_frame, curr_features.keypoints,
+                                   matches.matches, match_vis,
+                                   cv::Scalar::all(-1), cv::Scalar::all(-1),
+                                   std::vector<char>(),
+                                   cv::DrawMatchesFlags::NOT_DRAW_SINGLE_POINTS |
+                                   cv::DrawMatchesFlags::DRAW_RICH_KEYPOINTS);
+                    
+                    cv::resize(match_vis, display_frame_matches_,
+                               cv::Size(window_width_, window_height_));
+                }
             }
-            cv::resize(rgb, resized_frame_, resized_frame_.size(), 0, 0, cv::INTER_LINEAR);
-            working_frame = resized_frame_;
+            
+            // 매칭이 활성화된 경우에만 이전 프레임 저장 (얕은 복사)
+            prev_features_ = curr_features;
+            prev_frame_ = working_frame;
+            first_frame_ = false;
         }
 
-        auto resize_time = std::chrono::steady_clock::now();
+        // 시각화 업데이트 (필요한 경우만)
+        if (show_original_) {
+            std::lock_guard<std::mutex> lock(frame_mutex_);
+            cv::resize(rgb, display_frame_original_,
+                      cv::Size(window_width_, window_height_));
+        }
+        
+        if (show_features_) {
+            std::lock_guard<std::mutex> lock(frame_mutex_);
+            cv::resize(curr_features.visualization, display_frame_features_,
+                      cv::Size(window_width_, window_height_));
+        }
 
-        // 특징점 검출 및 시각화
-        if (show_features_ || feature_img_pub_->get_subscription_count() > 0) {
-            Features features = feature_detector_.detectFeatures(
-                image_processor_.process(working_frame, gray_buffer_).gray);
-            features_detected_ = !features.keypoints.empty();
+        // 시간 계산 (milliseconds로 변환)
+        auto to_ms = [](auto duration) {
+            return std::chrono::duration<double, std::milli>(duration).count();
+        };
 
-            auto feature_time = std::chrono::steady_clock::now();
+        double total_duration = to_ms(std::chrono::steady_clock::now() - start_time);
 
-            // 시각화 작업
-            if (show_original_ || show_features_) {
-                std::lock_guard<std::mutex> lock(frame_mutex_);
-                
-                static cv::Mat resized_buffer;
-                if (resized_buffer.empty() || resized_buffer.size() != cv::Size(window_width_, window_height_)) {
-                    resized_buffer.create(window_height_, window_width_, working_frame.type());
-                }
-                cv::resize(working_frame, resized_buffer, resized_buffer.size(), 0, 0, cv::INTER_NEAREST);
-                resized_buffer.copyTo(display_frame_original_);
+        // 현재 시간 가져오기
+        auto current_time = this->now();
 
-                // FPS 텍스트를 미리 생성
-                static std::string fps_text_buffer;
-                fps_text_buffer = cv::format("FPS: %.1f", original_fps_);
-
-                // 텍스트 오버레이 최적화
-                cv::putText(display_frame_original_, fps_text_buffer, 
-                            cv::Point(10, 30), cv::FONT_HERSHEY_SIMPLEX, 
-                            1.0, cv::Scalar(0, 255, 0), 1);  // 두께를 2에서 1로 줄임
+        // 원본 이미지 FPS 계산 및 표시
+        if (show_original_) {
+            original_frame_times_.push_back(current_time.seconds());
+            if (original_frame_times_.size() > static_cast<size_t>(fps_window_size_)) {
+                original_frame_times_.pop_front();
             }
+            if (original_frame_times_.size() >= 2) {
+                double time_diff = original_frame_times_.back() - original_frame_times_.front();
+                original_fps_ = (original_frame_times_.size() - 1) / time_diff;
 
-            if (show_features_ && features_detected_) {
-                if (resized_features_.empty() || 
-                    resized_features_.size() != cv::Size(window_width_, window_height_)) {
-                    resized_features_.create(window_height_, window_width_, features.visualization.type());
-                }
-                cv::resize(features.visualization, resized_features_, resized_features_.size(), 0, 0, cv::INTER_NEAREST);
-                resized_features_.copyTo(display_frame_features_);
+                // 화면에 FPS 표시
+                std::string fps_text = cv::format("FPS: %.1f", original_fps_);
+                cv::putText(display_frame_original_, fps_text, 
+                           cv::Point(10, 30), cv::FONT_HERSHEY_SIMPLEX, 
+                           1.0, cv::Scalar(0, 255, 0), 2);
+            }
+        }
 
-                // FPS 텍스트 추가
+        // 특징점 검출 FPS 계산 및 표시
+        if (show_features_) {
+            feature_frame_times_.push_back(current_time.seconds());
+            if (feature_frame_times_.size() > static_cast<size_t>(fps_window_size_)) {
+                feature_frame_times_.pop_front();
+            }
+            if (feature_frame_times_.size() >= 2) {
+                double time_diff = feature_frame_times_.back() - feature_frame_times_.front();
+                feature_fps_ = (feature_frame_times_.size() - 1) / time_diff;
+
+                // 화면에 FPS 표시
                 std::string fps_text = cv::format("FPS: %.1f", feature_fps_);
                 cv::putText(display_frame_features_, fps_text, 
                            cv::Point(10, 30), cv::FONT_HERSHEY_SIMPLEX, 
                            1.0, cv::Scalar(0, 255, 0), 2);
             }
-
-            auto viz_time = std::chrono::steady_clock::now();
-
-            // 시간 계산 (milliseconds로 변환)
-            auto to_ms = [](auto duration) {
-                return std::chrono::duration<double, std::milli>(duration).count();
-            };
-
-            double resize_duration = to_ms(resize_time - start_time);
-            double feature_duration = to_ms(feature_time - resize_time);
-            double viz_duration = to_ms(viz_time - feature_time);
-            double total_duration = to_ms(viz_time - start_time);
-
-            // 현재 시간 가져오기
-            auto current_time = this->now();
-
-            // 원본 이미지 FPS 계산 및 표시
-            if (show_original_) {
-                original_frame_times_.push_back(current_time.seconds());
-                if (original_frame_times_.size() > static_cast<size_t>(fps_window_size_)) {
-                    original_frame_times_.pop_front();
-                }
-                if (original_frame_times_.size() >= 2) {
-                    double time_diff = original_frame_times_.back() - original_frame_times_.front();
-                    original_fps_ = (original_frame_times_.size() - 1) / time_diff;
-
-                    // 화면에 FPS 표시
-                    std::string fps_text = cv::format("FPS: %.1f", original_fps_);
-                    cv::putText(display_frame_original_, fps_text, 
-                               cv::Point(10, 30), cv::FONT_HERSHEY_SIMPLEX, 
-                               1.0, cv::Scalar(0, 255, 0), 2);
-                }
-            }
-
-            // 특징점 검출 FPS 계산 및 표시
-            if (show_features_ && features_detected_) {
-                feature_frame_times_.push_back(current_time.seconds());
-                if (feature_frame_times_.size() > static_cast<size_t>(fps_window_size_)) {
-                    feature_frame_times_.pop_front();
-                }
-                if (feature_frame_times_.size() >= 2) {
-                    double time_diff = feature_frame_times_.back() - feature_frame_times_.front();
-                    feature_fps_ = (feature_frame_times_.size() - 1) / time_diff;
-
-                    // 화면에 FPS 표시
-                    std::string fps_text = cv::format("FPS: %.1f", feature_fps_);
-                    cv::putText(display_frame_features_, fps_text, 
-                               cv::Point(10, 30), cv::FONT_HERSHEY_SIMPLEX, 
-                               1.0, cv::Scalar(0, 255, 0), 2);
-                }
-            }
-
-            // FPS 및 타이밍 정보 출력 (1초마다)
-            if ((current_time - last_fps_print_time_).seconds() >= 1.0) {
-                RCLCPP_INFO(this->get_logger(), 
-                          "FPS - Original: %.1f, Features: %.1f (Processing: %.1f ms, ZED: %.1f ms)",
-                          original_fps_,
-                          feature_fps_,
-                          total_duration,
-                          zed_acquisition_time_);
-                last_fps_print_time_ = current_time;
-
-                // 타이밍 정보도 출력
-                RCLCPP_INFO(this->get_logger(),
-                           "Timing breakdown:\n"
-                           "  Resize: %.1f ms\n"
-                           "  Feature detection: %.1f ms\n"
-                           "  Visualization: %.1f ms\n"
-                           "  Total: %.1f ms",
-                           resize_duration, feature_duration, viz_duration, total_duration);
-            }
-
-            // 특징점 시각화 이미지 발행
-            if (feature_img_pub_->get_subscription_count() > 0 && features_detected_) {
-                std_msgs::msg::Header header;
-                header.stamp = this->now();
-                header.frame_id = "zed_camera";
-                
-                sensor_msgs::msg::Image::SharedPtr feature_msg = 
-                    cv_bridge::CvImage(header, "bgr8", 
-                                     features.visualization).toImageMsg();
-                feature_img_pub_->publish(*feature_msg);
-            }
         }
 
-        // 깊이 이미지 처리
-        if (!depth.empty()) {
-            if (current_depth_.empty() || 
-                current_depth_.size() != depth.size()) {
-                current_depth_.create(depth.size(), depth.type());
-                previous_depth_.create(depth.size(), depth.type());
-            }
+        // FPS 및 타이밍 정보 출력 (1초마다)
+        if ((current_time - last_fps_print_time_).seconds() >= 1.0) {
+            RCLCPP_INFO(this->get_logger(), 
+                      "FPS - Original: %.1f, Features: %.1f (Processing: %.1f ms, ZED: %.1f ms)",
+                      original_fps_,
+                      feature_fps_,
+                      total_duration,
+                      zed_acquisition_time_);
+            last_fps_print_time_ = current_time;
+
+            // 타이밍 정보도 출력
+            RCLCPP_INFO(this->get_logger(),
+                       "Timing breakdown:\n"
+                       "  Total: %.1f ms",
+                       total_duration);
+        }
+
+        // 특징점 시각화 이미지 발행
+        if (feature_img_pub_->get_subscription_count() > 0 && !curr_features.keypoints.empty()) {
+            std_msgs::msg::Header header;
+            header.stamp = this->now();
+            header.frame_id = "zed_camera";
             
-            current_depth_.copyTo(previous_depth_);
-            depth.copyTo(current_depth_);
+            sensor_msgs::msg::Image::SharedPtr feature_msg = 
+                cv_bridge::CvImage(header, "bgr8", 
+                                 curr_features.visualization).toImageMsg();
+            feature_img_pub_->publish(*feature_msg);
         }
     }
     catch (const std::exception& e) {
@@ -516,8 +508,10 @@ void VisualOdometryNode::processImages(const cv::Mat& rgb, const cv::Mat& depth)
 }
 
 void VisualOdometryNode::displayLoop() {
+    static bool was_showing_matches = false;  // 이전 상태 저장
+
     while (rclcpp::ok() && !should_exit_) {
-        if (show_original_ || show_features_) {
+        if (show_original_ || show_features_ || show_matches_) {
             std::lock_guard<std::mutex> lock(frame_mutex_);
             
             // 한 번에 모든 윈도우 업데이트
@@ -527,13 +521,19 @@ void VisualOdometryNode::displayLoop() {
             if (show_features_ && !display_frame_features_.empty()) {
                 cv::imshow(feature_window_name_, display_frame_features_);
             }
+            if (show_matches_ && !display_frame_matches_.empty()) {
+                cv::imshow(matches_window_name_, display_frame_matches_);
+                was_showing_matches = true;
+            } else if (was_showing_matches) {
+                // 매칭 윈도우가 표시되었다가 비활성화된 경우 윈도우 닫기
+                cv::destroyWindow(matches_window_name_);
+                was_showing_matches = false;
+            }
             
-            // 최소한의 대기 시간 사용
             cv::waitKey(1);
         }
         
-        // CPU 사용량 최적화
-        std::this_thread::sleep_for(std::chrono::microseconds(100));
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 }
 

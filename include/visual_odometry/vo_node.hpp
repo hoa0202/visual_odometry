@@ -61,12 +61,14 @@ private:
     // 시각화 관련 변수들
     bool show_original_{true};
     bool show_features_{true};
+    bool show_matches_{true};  // 매칭 표시 여부
     int window_width_{800};
     int window_height_{600};
     int window_pos_x_{100};
     int window_pos_y_{100};
     const std::string original_window_name_{"Original Image"};
     const std::string feature_window_name_{"Feature Detection Result"};
+    const std::string matches_window_name_{"Feature Matches"};  // 매칭 윈도우 이름
 
     std::thread display_thread_;
     std::mutex frame_mutex_;
@@ -92,8 +94,9 @@ private:
     void zedTimerCallback();
     void processImages(const cv::Mat& rgb, const cv::Mat& depth);
 
-    cv::Mat display_frame_original_;  // 원본 이미지용
-    cv::Mat display_frame_features_;  // 특징점 이미지용
+    cv::Mat display_frame_original_;   // 원본 이미지용
+    cv::Mat display_frame_features_;   // 특징점 이미지용
+    cv::Mat display_frame_matches_;    // 매칭 결과 이미지용
 
     // 이미지 처리를 위한 버퍼들
     cv::Mat resized_frame_;
@@ -121,6 +124,11 @@ private:
     std::condition_variable image_ready_;
     std::thread processing_thread_;
     void processingLoop();
+
+    // 매칭 관련 멤버 추가
+    Features prev_features_;
+    cv::Mat prev_frame_;
+    bool first_frame_{true};
 };
 
 } // namespace vo 
