@@ -11,7 +11,9 @@ public:
     ~FeatureDetector() = default;
 
     // 특징점 검출 메서드
-    Features detectFeatures(const cv::Mat& image);
+    Features detectFeatures(const cv::Mat& image, 
+                          int max_features = 2000,
+                          int fast_threshold = 20);
     
     // 파라미터 설정 메서드들
     void setMaxFeatures(int max_features);
@@ -20,8 +22,10 @@ public:
     void setVisualizationType(const std::string& type);
 
     // 매칭 관련 함수 추가
-    FeatureMatches matchFeatures(const Features& prev_features, 
-                               const Features& curr_features);
+    FeatureMatches matchFeatures(const Features& prev_features,
+                               const Features& curr_features,
+                               float ratio_threshold = 0.8f,
+                               bool crossCheck = true);
     
     // 매칭 파라미터 설정
     void setMatchingParams(float ratio_threshold = 0.7f) {
@@ -33,6 +37,7 @@ private:
     void updateDetector();
 
     cv::Ptr<cv::ORB> detector_;
+    cv::Ptr<cv::ORB> descriptor_;
     int max_features_ = 2000;
     float scale_factor_ = 1.2f;
     int n_levels_ = 8;

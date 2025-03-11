@@ -25,6 +25,18 @@ find_package(sensor_msgs REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(image_transport REQUIRED)
 find_package(ZED 3 REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(rosidl_default_generators REQUIRED)
+
+# 메시지 생성 (ament_package 전에 호출)
+rosidl_generate_interfaces(${PROJECT_NAME}
+  "msg/VOState.msg"
+  DEPENDENCIES std_msgs geometry_msgs
+)
+
+# 실행 파일이 메시지 인터페이스를 사용할 수 있도록 설정
+rosidl_get_typesupport_target(cpp_typesupport_target
+  ${PROJECT_NAME} "rosidl_typesupport_cpp")
 
 # 헤더 파일 포함 디렉토리 설정
 include_directories(
@@ -51,6 +63,7 @@ target_link_libraries(vo_node
   ${OpenCV_LIBRARIES}
   ${ZED_LIBRARIES}
   ${CUDA_LIBRARIES}
+  "${cpp_typesupport_target}"
 )
 
 # ament 의존성 추가
@@ -59,6 +72,8 @@ ament_target_dependencies(vo_node
   sensor_msgs
   cv_bridge
   image_transport
+  geometry_msgs
+  std_msgs
 )
 
 # 설치 규칙
@@ -78,8 +93,8 @@ install(DIRECTORY
   DESTINATION share/${PROJECT_NAME}
 )
 
-# 패키지 설정 파일 생성
-ament_package()
-
 # 링커 옵션 추가
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--as-needed")
+
+# 패키지 설정 파일 생성 (마지막에 호출)
+ament_package()

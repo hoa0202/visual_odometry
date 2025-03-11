@@ -14,6 +14,9 @@
 #include <deque>
 #include <queue>
 #include <condition_variable>
+#include <geometry_msgs/msg/pose_stamped.hpp>
+#include "visual_odometry/msg/vo_state.hpp"
+#include <chrono>
 
 namespace vo {
 
@@ -46,6 +49,8 @@ private:
     
     // Publisher
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr feature_img_pub_;
+    rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr pose_pub_;
+    rclcpp::Publisher<visual_odometry::msg::VOState>::SharedPtr vo_state_pub_;
     
     // 파라미터 콜백 핸들
     OnSetParametersCallbackHandle::SharedPtr param_callback_handle_;
@@ -67,8 +72,8 @@ private:
     int window_pos_x_{100};
     int window_pos_y_{100};
     const std::string original_window_name_{"Original Image"};
-    const std::string feature_window_name_{"Feature Detection Result"};
-    const std::string matches_window_name_{"Feature Matches"};  // 매칭 윈도우 이름
+    const std::string feature_window_name_{"Feature Detection"};
+    const std::string matches_window_name_{"Feature Matches"};  // 추가
 
     std::thread display_thread_;
     std::mutex frame_mutex_;
@@ -105,7 +110,7 @@ private:
     cv::Mat resized_features_;
 
     // 타이밍 측정을 위한 변수들
-    rclcpp::Time start_time_;
+    std::chrono::steady_clock::time_point start_time_;
     rclcpp::Time resize_start_;
     rclcpp::Time feature_start_;
     rclcpp::Time viz_start_;
@@ -129,6 +134,17 @@ private:
     Features prev_features_;
     cv::Mat prev_frame_;
     bool first_frame_{true};
+
+    // 이미지 처리를 위한 버퍼
+    cv::Mat working_frame_;  // 작업용 프레임 버퍼
+    
+    // 새로운 시각화 함수 선언
+    void updateVisualization(const cv::Mat& rgb, 
+                           const Features& features,
+                           const FeatureMatches& matches);
+
+    // 결과 발행 함수 선언
+    void publishResults(const Features& features, const FeatureMatches& matches);
 };
 
 } // namespace vo 

@@ -16,28 +16,39 @@
       camera_info: "/zed/zed_node/rgb/camera_info"
       feature_image: "feature_image"  # 발행할 토픽
       
-    # Feature Detector Parameters
+    # Processing Parameters (연산 활성화 여부)
+    processing:
+      enable_feature_detection: true   # 특징점 검출 활성화
+      enable_feature_matching: true    # 특징점 매칭 활성화
+      enable_pose_estimation: true     # 포즈 추정 활성화
+      publish_results: true            # 결과 토픽 발행 활성화
+
+    # Feature Detector Parameters (연산 파라미터)
     feature_detector:
-      max_features: 2000
+      max_features: 500
       scale_factor: 1.2
       n_levels: 8
-      visualization_type: "points"  # "points" 또는 "rich"
+      fast_threshold: 25
+      image_scale: 0.2
       matching:
-        ratio_threshold: 0.7
-        show_matches: true  # 매칭 결과 표시 여부
+        ratio_threshold: 0.8
+        cross_check: false
 
-    # Visualization Parameters
+    # Visualization Parameters (시각화 설정)
     visualization:
-      window_width: 800    # 윈도우 너비
-      window_height: 600   # 윈도우 높이
-      show_original: true  # 원본 이미지 표시 여부
-      show_features: true  # 특징점 이미지 표시 여부
-      show_matches: true   # 매칭 결과 표시 여부
-      original_window_name: "Original Image"
-      feature_window_name: "Feature Detection Result"
-      matches_window_name: "Feature Matches"  # 매칭 윈도우 이름 추가
-      window_pos_x: 100    # 첫 번째 윈도우 x 위치
-      window_pos_y: 100    # 첫 번째 윈도우 y 위치
+      enable: true                    # 전체 시각화 활성화/비활성화
+      window_width: 800
+      window_height: 600
+      window_pos_x: 100
+      window_pos_y: 100
+      windows:
+        show_original: true           # 원본 이미지 윈도우
+        show_features: true           # 특징점 윈도우
+        show_matches: true            # 매칭 윈도우
+      window_names:
+        original: "Original Image"
+        features: "Feature Detection"
+        matches: "Feature Matches"
 
     # Image Processor Parameters
     image_processor:

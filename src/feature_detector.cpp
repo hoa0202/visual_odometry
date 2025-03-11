@@ -9,43 +9,39 @@ FeatureDetector::FeatureDetector() {
     updateDetector();
 }
 
-Features FeatureDetector::detectFeatures(const cv::Mat& gray) {
+Features FeatureDetector::detectFeatures(const cv::Mat& image, 
+                                       int max_features,
+                                       int fast_threshold) {
     Features features;
     
-    // FAST 파라미터 최적화
-    static const int fast_threshold = 20;  // static으로 변경
-    static const bool non_max_suppression = true;
+    // FAST 검출기 파라미터 설정
+    detector_->setMaxFeatures(max_features);
+    detector_->setFastThreshold(fast_threshold);
     
-    // 메모리 재사용
-    static std::vector<cv::KeyPoint> keypoints;
-    keypoints.clear();  // 벡터 재사용
+    // 특징점 검출
+    detector_->detect(image, features.keypoints);
     
-    cv::FAST(gray, keypoints, fast_threshold, non_max_suppression);
+    // 특징점 계산
+    descriptor_->compute(image, features.keypoints, features.descriptors);
     
-    // 특징점 개수 제한 (부호 없는 정수 비교 수정)
-    if (static_cast<int>(keypoints.size()) > max_features_) {
-        std::partial_sort(keypoints.begin(), 
-                         keypoints.begin() + max_features_,
-                         keypoints.end(),
-                         [](const cv::KeyPoint& a, const cv::KeyPoint& b) {
-                             return a.response > b.response;
-                         });
-        keypoints.resize(max_features_);
+    // 시각화
+    features.visualization = cv::Mat::zeros(image.size(), CV_8UC3);
+    if (image.channels() == 1) {
+        cv::cvtColor(image, features.visualization, cv::COLOR_GRAY2BGR);
+    } else {
+        image.copyTo(features.visualization);
     }
     
-    features.keypoints = keypoints;
-    
-    // 디스크립터 계산 추가
-    detector_->compute(gray, features.keypoints, features.descriptors);
-    
-    // 시각화는 필요한 경우만
-    if (visualization_needed_) {
-        cv::Mat vis = cv::Mat::zeros(gray.size(), CV_8UC3);
-        cv::cvtColor(gray, vis, cv::COLOR_GRAY2BGR);
-        for (const auto& kp : keypoints) {
-            cv::circle(vis, kp.pt, 3, cv::Scalar(0,255,0), -1);
+    // 특징점 그리기
+    if (visualization_flags_ == static_cast<int>(cv::DrawMatchesFlags::DRAW_RICH_KEYPOINTS)) {
+        cv::drawKeypoints(features.visualization, features.keypoints, 
+                         features.visualization,
+                         cv::Scalar(0, 255, 0),
+                         cv::DrawMatchesFlags::DRAW_RICH_KEYPOINTS);
+    } else {
+        for (const auto& kp : features.keypoints) {
+            cv::circle(features.visualization, kp.pt, 3, cv::Scalar(0,255,0), -1);
         }
-        features.visualization = vis;
     }
     
     return features;
@@ -88,46 +84,70 @@ void FeatureDetector::updateDetector() {
         scale_factor_,     // 스케일 팩터
         n_levels_          // 피라미드 레벨 수
     );
+    
+    descriptor_ = detector_;  // 동일한 ORB 객체 사용
 }
 
-FeatureMatches FeatureDetector::matchFeatures(
-    const Features& prev_features, 
-    const Features& curr_features) {
+FeatureMatches FeatureDetector::matchFeatures(const Features& prev_features,
+                                            const Features& curr_features,
+                                            float ratio_threshold,
+                                            bool crossCheck) {
+    FeatureMatches matches;
     
-    static FeatureMatches matches_result;
-    matches_result.matches.clear();
-    matches_result.prev_points.clear();
-    matches_result.curr_points.clear();
-    
-    if (prev_features.keypoints.empty() || curr_features.keypoints.empty()) {
-        return matches_result;
+    if (prev_features.descriptors.empty() || curr_features.descriptors.empty()) {
+        return matches;
     }
-
-    static std::vector<std::vector<cv::DMatch>> knn_matches;
-    knn_matches.clear();
     
-    // 직접 Hamming 매칭 수행
-    matcher_->knnMatch(prev_features.descriptors,
-                      curr_features.descriptors,
-                      knn_matches, 2);
+    try {
+        // matcher를 매번 새로 생성하지 않고 재사용
+        if (!matcher_) {
+            matcher_ = cv::BFMatcher::create(cv::NORM_HAMMING);
+        }
 
-    matches_result.matches.reserve(knn_matches.size());
-    matches_result.prev_points.reserve(knn_matches.size());
-    matches_result.curr_points.reserve(knn_matches.size());
-
-    for (const auto& knn_match : knn_matches) {
-        if (knn_match.size() < 2) continue;
-        
-        if (knn_match[0].distance < ratio_threshold_ * knn_match[1].distance) {
-            matches_result.matches.push_back(knn_match[0]);
-            matches_result.prev_points.push_back(
-                prev_features.keypoints[knn_match[0].queryIdx].pt);
-            matches_result.curr_points.push_back(
-                curr_features.keypoints[knn_match[0].trainIdx].pt);
+        if (crossCheck) {
+            // 교차 검사를 사용하는 경우 직접 매칭
+            std::vector<cv::DMatch> direct_matches;
+            matcher_->match(prev_features.descriptors, curr_features.descriptors, 
+                          direct_matches);
+            
+            // 교차 검사 수행
+            std::vector<cv::DMatch> reverse_matches;
+            matcher_->match(curr_features.descriptors, prev_features.descriptors, 
+                          reverse_matches);
+            
+            // 양방향 매칭이 일치하는 것만 선택
+            for (const auto& forward_match : direct_matches) {
+                const auto& reverse_match = reverse_matches[forward_match.trainIdx];
+                if (reverse_match.trainIdx == forward_match.queryIdx) {
+                    matches.matches.push_back(forward_match);
+                }
+            }
+        } else {
+            // k-최근접 이웃 매칭
+            std::vector<std::vector<cv::DMatch>> knn_matches;
+            matcher_->knnMatch(prev_features.descriptors, curr_features.descriptors, 
+                             knn_matches, 2);
+            
+            // 비율 테스트 적용
+            matches.matches.reserve(knn_matches.size());
+            for (const auto& knn_match : knn_matches) {
+                if (knn_match.size() >= 2 && 
+                    knn_match[0].distance < ratio_threshold * knn_match[1].distance) {
+                    matches.matches.push_back(knn_match[0]);
+                }
+            }
         }
     }
-
-    return matches_result;
+    catch (const cv::Exception& e) {
+        RCLCPP_ERROR(rclcpp::get_logger("feature_detector"), 
+                    "OpenCV error in matchFeatures: %s", e.what());
+    }
+    catch (const std::exception& e) {
+        RCLCPP_ERROR(rclcpp::get_logger("feature_detector"), 
+                    "Error in matchFeatures: %s", e.what());
+    }
+    
+    return matches;
 }
 
 } // namespace vo 
