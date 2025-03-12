@@ -452,13 +452,85 @@ void VisualOdometryNode::processImages(const cv::Mat& rgb, const cv::Mat& depth)
                 }
 
                 if (show_matches_ && !prev_frame_gray_.empty() && !first_frame_) {
-                    cv::Mat matches_img;
-                    cv::drawMatches(prev_frame_, prev_features_.keypoints,
-                                  rgb, features.keypoints,
-                                  matches.matches, matches_img);
-                    cv::resize(matches_img, matches_img, 
-                             cv::Size(window_width_ * 2, window_height_));
-                    display_frame_matches_ = matches_img.clone();
+                    try {
+                        // 매칭 결과 유효성 검사
+                        bool valid_matches = true;
+                        for (const auto& match : matches.matches) {
+                            if (match.queryIdx >= prev_features_.keypoints.size() ||
+                                match.trainIdx >= features.keypoints.size()) {
+                                valid_matches = false;
+                                RCLCPP_WARN(this->get_logger(), 
+                                    "Invalid match index: query=%d/%zu, train=%d/%zu",
+                                    match.queryIdx, prev_features_.keypoints.size(),
+                                    match.trainIdx, features.keypoints.size());
+                                break;
+                            }
+                        }
+
+                        if (valid_matches && !matches.matches.empty()) {
+                            cv::Mat matches_img;
+                            std::vector<cv::DMatch> good_matches;
+                            
+                            // 유효한 매치만 필터링
+                            for (const auto& match : matches.matches) {
+                                if (match.queryIdx < prev_features_.keypoints.size() &&
+                                    match.trainIdx < features.keypoints.size()) {
+                                    good_matches.push_back(match);
+                                }
+                            }
+
+                            // 매칭 수를 제한
+                            size_t max_matches_to_draw = 100;  // 최대 100개만 표시
+                            if (good_matches.size() > max_matches_to_draw) {
+                                std::sort(good_matches.begin(), good_matches.end(),
+                                         [](const cv::DMatch& a, const cv::DMatch& b) {
+                                             return a.distance < b.distance;
+                                         });
+                                good_matches.resize(max_matches_to_draw);
+                            }
+
+                            if (!good_matches.empty()) {
+                                // 이미지 크기 조정
+                                cv::Mat prev_resized, curr_resized;
+                                cv::resize(prev_frame_, prev_resized, 
+                                         cv::Size(window_width_, window_height_));
+                                cv::resize(rgb, curr_resized, 
+                                         cv::Size(window_width_, window_height_));
+
+                                // 매칭 그리기
+                                cv::drawMatches(prev_resized, prev_features_.keypoints,
+                                              curr_resized, features.keypoints,
+                                              good_matches, matches_img,
+                                              cv::Scalar(0, 255, 0),  // 매칭 선 색상 (녹색)
+                                              cv::Scalar(255, 0, 0),  // 키포인트 색상 (파란색)
+                                              std::vector<char>(),    // 마스크
+                                              cv::DrawMatchesFlags::DRAW_RICH_KEYPOINTS |
+                                              cv::DrawMatchesFlags::NOT_DRAW_SINGLE_POINTS);
+
+                                // 매칭 선 두께 조정을 위한 후처리
+                                cv::Mat overlay = matches_img.clone();
+                                for (const auto& match : good_matches) {
+                                    cv::Point2f pt1 = prev_features_.keypoints[match.queryIdx].pt;
+                                    cv::Point2f pt2 = features.keypoints[match.trainIdx].pt;
+                                    // 크기 조정된 좌표로 변환
+                                    pt1.x *= static_cast<float>(window_width_) / prev_frame_.cols;
+                                    pt1.y *= static_cast<float>(window_height_) / prev_frame_.rows;
+                                    pt2.x *= static_cast<float>(window_width_) / rgb.cols;
+                                    pt2.y *= static_cast<float>(window_height_) / rgb.rows;
+                                    pt2.x += window_width_;  // 오른쪽 이미지의 좌표 조정
+                                    cv::line(overlay, pt1, pt2, cv::Scalar(0, 255, 0), 2);
+                                }
+                                
+                                cv::addWeighted(overlay, 0.5, matches_img, 0.5, 0, matches_img);
+                                
+                                // 결과 저장
+                                display_frame_matches_ = matches_img.clone();
+                            }
+                        }
+                    }
+                    catch (const cv::Exception& e) {
+                        RCLCPP_ERROR(this->get_logger(), "OpenCV error in visualization: %s", e.what());
+                    }
                 }
             }
             catch (const cv::Exception& e) {
