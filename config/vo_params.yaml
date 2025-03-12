@@ -42,9 +42,9 @@
       window_pos_x: 100
       window_pos_y: 100
       windows:
-        show_original: true           # 원본 이미지 윈도우
-        show_features: true           # 특징점 윈도우
-        show_matches: true            # 매칭 윈도우
+        show_original: false           # 원본 이미지 윈도우
+        show_features: false           # 특징점 윈도우
+        show_matches: false            # 매칭 윈도우
       window_names:
         original: "Original Image"
         features: "Feature Detection"
