@@ -47,12 +47,10 @@ FeatureDetector::FeatureDetector() {
 Features FeatureDetector::detectFeatures(const cv::Mat& frame, 
                                        int max_features,
                                        int fast_threshold) {
-    Features result;
+    Features current_features;
     
-    // 버퍼 재사용
+    // 현재 프레임 특징점 검출
     keypoints_buffer_.clear();
-    
-    // 특징점 검출
     detector_->setThreshold(fast_threshold);
     detector_->detect(frame, keypoints_buffer_);
     
@@ -68,11 +66,24 @@ Features FeatureDetector::detectFeatures(const cv::Mat& frame,
     // 디스크립터 계산
     descriptor_->compute(frame, keypoints_buffer_, descriptors_buffer_);
     
-    // 결과 설정
-    result.keypoints = keypoints_buffer_;
-    result.descriptors = descriptors_buffer_;
+    // 현재 특징점 저장
+    current_features.keypoints = keypoints_buffer_;
+    current_features.descriptors = descriptors_buffer_;
+
+    // 첫 프레임이면 이전 프레임으로 저장하고 리턴
+    if (first_frame_) {
+        prev_features_ = current_features;
+        first_frame_ = false;
+        return current_features;
+    }
+
+    // 이전 프레임과 매칭
+    auto matches = matchFeatures(prev_features_, current_features);
+
+    // 현재 프레임을 이전 프레임으로 저장
+    prev_features_ = current_features;
     
-    return result;
+    return current_features;
 }
 
 FeatureMatches FeatureDetector::matchFeatures(const Features& prev_features,

@@ -25,7 +25,7 @@
 
     # Feature Detector Parameters (연산 파라미터)
     feature_detector:
-      max_features: 500              # 최대 특징점 개수
+      max_features: 1000              # 최대 특징점 개수 "1000개 고정으로 수정 금지"
       scale_factor: 1.2             # 스케일 팩터
       n_levels: 8                   # 피라미드 레벨 수
       fast_threshold: 25            # FAST 임계값

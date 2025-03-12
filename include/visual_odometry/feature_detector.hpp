@@ -39,6 +39,10 @@ private:
     cv::Mat descriptors_buffer_;
     std::vector<cv::KeyPoint> keypoints_buffer_;
 
+    // 이전 프레임 특징점 저장
+    Features prev_features_;
+    bool first_frame_{true};
+
     // 내부 메서드
     void updateDetector();
 };

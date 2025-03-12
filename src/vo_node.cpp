@@ -109,6 +109,10 @@ VisualOdometryNode::VisualOdometryNode()
         show_matches_ ? "true" : "false",
         show_original_ ? "true" : "false",
         show_features_ ? "true" : "false");
+
+    // 이전 프레임 관련 변수 초기화
+    prev_frame_ = cv::Mat();
+    prev_features_ = Features();
 }
 
 VisualOdometryNode::~VisualOdometryNode() {
@@ -411,62 +415,79 @@ void VisualOdometryNode::zedTimerCallback() {
 
 void VisualOdometryNode::processImages(const cv::Mat& rgb, const cv::Mat& depth) {
     try {
-        start_time_ = std::chrono::steady_clock::now();
-        
-        // 이전 비동기 작업이 완료될 때까지 대기
-        if (viz_future_.valid()) viz_future_.wait();
-        if (pub_future_.valid()) pub_future_.wait();
-
-        // 이미지 스케일링 (성능 향상을 위해)
-        double image_scale = this->get_parameter("feature_detector.image_scale").as_double();
-        if (working_frame_.empty() || working_frame_.size() != cv::Size(rgb.cols * image_scale, rgb.rows * image_scale)) {
-            working_frame_.create(cv::Size(rgb.cols * image_scale, rgb.rows * image_scale), rgb.type());
-            gray_buffer_.create(working_frame_.size(), CV_8UC1);
+        // 입력 이미지 체크
+        if (rgb.empty()) {
+            RCLCPP_ERROR(this->get_logger(), "Empty RGB image received");
+            return;
         }
-        
-        // 이미지 크기 조정 및 그레이스케일 변환
-        cv::resize(rgb, working_frame_, working_frame_.size());
-        cv::cvtColor(working_frame_, gray_buffer_, cv::COLOR_BGR2GRAY);
 
-        // 특징점 검출 (그레이스케일 이미지 사용)
-        Features curr_features = feature_detector_.detectFeatures(
-            gray_buffer_, max_features_, fast_threshold_);
-        
+        // RGB to Gray 변환
+        cv::Mat gray;
+        cv::cvtColor(rgb, gray, cv::COLOR_BGR2GRAY);
+
+        // 특징점 검출
+        auto features = feature_detector_.detectFeatures(gray,
+            max_features_, fast_threshold_);
+
         // 매칭 수행 (첫 프레임이 아닐 때만)
-        FeatureMatches matches;
-        if (!first_frame_) {
-            matches = feature_detector_.matchFeatures(prev_features_, curr_features);
+        if (!prev_frame_.empty()) {
+            auto matches = feature_detector_.matchFeatures(prev_features_, features);
+
+            // 시각화 업데이트
+            if (show_original_ || show_features_ || show_matches_) {
+                cv::Mat visualization;
+                
+                // 원본 이미지 표시
+                if (show_original_) {
+                    cv::Mat resized;
+                    cv::resize(rgb, resized, cv::Size(window_width_, window_height_));
+                    cv::imshow(original_window_name_, resized);
+                    cv::moveWindow(original_window_name_, window_pos_x_, window_pos_y_);
+                }
+
+                // 특징점 표시
+                if (show_features_) {
+                    cv::Mat feature_img = rgb.clone();
+                    for (const auto& kp : features.keypoints) {
+                        cv::circle(feature_img, kp.pt, 3, cv::Scalar(0, 255, 0), -1);
+                    }
+                    cv::resize(feature_img, feature_img, cv::Size(window_width_, window_height_));
+                    cv::imshow(feature_window_name_, feature_img);
+                    cv::moveWindow(feature_window_name_, window_pos_x_ + window_width_ + 10, window_pos_y_);
+                }
+
+                // 매칭 결과 표시
+                if (show_matches_) {
+                    cv::Mat matches_img;
+                    cv::drawMatches(prev_frame_, prev_features_.keypoints,
+                                  rgb, features.keypoints,
+                                  matches.matches, matches_img,
+                                  cv::Scalar::all(-1), cv::Scalar::all(-1),
+                                  std::vector<char>(),
+                                  cv::DrawMatchesFlags::DEFAULT);
+                    cv::resize(matches_img, matches_img, cv::Size(window_width_, window_height_));
+                    cv::imshow(matches_window_name_, matches_img);
+                    cv::moveWindow(matches_window_name_, 
+                                 window_pos_x_ + 2 * (window_width_ + 10), 
+                                 window_pos_y_);
+                }
+                
+                cv::waitKey(1);
+            }
+
+            // 결과 발행
+            publishResults(features, matches);
         }
 
-        // 현재 프레임을 이전 프레임으로 저장
-        prev_features_ = curr_features;
-        first_frame_ = false;
+        // 현재 프레임 저장
+        prev_frame_ = rgb.clone();
+        prev_features_ = features;
 
-        // 시각화 및 결과 발행은 별도 스레드에서 처리
-        if (show_original_ || show_features_ || show_matches_) {
-            viz_future_ = std::async(std::launch::async, [this, curr_features, matches]() {
-                updateVisualization(working_frame_, curr_features, matches);
-            });
-        }
-
-        if (this->get_parameter("processing.publish_results").as_bool()) {
-            pub_future_ = std::async(std::launch::async, [this, curr_features, matches]() {
-                publishResults(curr_features, matches);
-            });
-        }
-
-        // FPS 및 성능 측정
-        double total_duration = std::chrono::duration<double, std::milli>(
-            std::chrono::steady_clock::now() - start_time_).count();
-
-        // 로그 출력
         RCLCPP_INFO(this->get_logger(), 
-            "Processing time: %.1f ms, Features: %zu, Matches: %zu",
-            total_duration,
-            curr_features.keypoints.size(),
-            matches.matches.size());
-
-    } catch (const std::exception& e) {
+            "Frame processed: %d features detected", 
+            static_cast<int>(features.keypoints.size()));
+    }
+    catch (const std::exception& e) {
         RCLCPP_ERROR(this->get_logger(), "Error in processImages: %s", e.what());
     }
 }

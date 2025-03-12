@@ -65,16 +65,16 @@ private:
     cv::Mat previous_depth_;
 
     // 시각화 관련 변수들
-    bool show_original_{true};
-    bool show_features_{true};
-    bool show_matches_{true};  // 매칭 표시 여부
+    bool show_original_{false};
+    bool show_features_{false};
+    bool show_matches_{false};
     int window_width_{800};
     int window_height_{600};
     int window_pos_x_{100};
     int window_pos_y_{100};
     const std::string original_window_name_{"Original Image"};
     const std::string feature_window_name_{"Feature Detection"};
-    const std::string matches_window_name_{"Feature Matches"};  // 추가
+    const std::string matches_window_name_{"Feature Matches"};
 
     std::thread display_thread_;
     std::mutex frame_mutex_;
@@ -148,8 +148,8 @@ private:
     void publishResults(const Features& features, const FeatureMatches& matches);
 
     // 특징점 검출 파라미터
-    int max_features_{500};  // 기본값 500
-    int fast_threshold_{25}; // 기본값 25
+    int max_features_{500};
+    int fast_threshold_{20};
 
     // 비동기 작업 관리를 위한 변수들
     std::future<void> viz_future_;
