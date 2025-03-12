@@ -415,6 +415,14 @@ void VisualOdometryNode::zedTimerCallback() {
 
 void VisualOdometryNode::processImages(const cv::Mat& rgb, const cv::Mat& depth) {
     try {
+        static rclcpp::Time last_log_time = this->now();
+        static int frame_count = 0;
+        
+        // 각 단계별 연산 시간 측정을 위한 변수들
+        static double feature_detection_time = 0.0;
+        static double feature_matching_time = 0.0;
+        static double visualization_time = 0.0;
+
         // 입력 이미지 체크
         if (rgb.empty()) {
             RCLCPP_ERROR(this->get_logger(), "Empty RGB image received");
@@ -425,67 +433,106 @@ void VisualOdometryNode::processImages(const cv::Mat& rgb, const cv::Mat& depth)
         cv::Mat gray;
         cv::cvtColor(rgb, gray, cv::COLOR_BGR2GRAY);
 
-        // 특징점 검출
+        // 특징점 검출 시간 측정
+        auto detect_start = std::chrono::steady_clock::now();
         auto features = feature_detector_.detectFeatures(gray,
             max_features_, fast_threshold_);
+        feature_detection_time = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - detect_start).count();
 
-        // 매칭 수행 (첫 프레임이 아닐 때만)
+        // 매칭 수행 시간 측정
+        FeatureMatches matches;
+        double matching_time = 0.0;
         if (!prev_frame_.empty()) {
-            auto matches = feature_detector_.matchFeatures(prev_features_, features);
-
-            // 시각화 업데이트
-            if (show_original_ || show_features_ || show_matches_) {
-                cv::Mat visualization;
-                
-                // 원본 이미지 표시
-                if (show_original_) {
-                    cv::Mat resized;
-                    cv::resize(rgb, resized, cv::Size(window_width_, window_height_));
-                    cv::imshow(original_window_name_, resized);
-                    cv::moveWindow(original_window_name_, window_pos_x_, window_pos_y_);
-                }
-
-                // 특징점 표시
-                if (show_features_) {
-                    cv::Mat feature_img = rgb.clone();
-                    for (const auto& kp : features.keypoints) {
-                        cv::circle(feature_img, kp.pt, 3, cv::Scalar(0, 255, 0), -1);
-                    }
-                    cv::resize(feature_img, feature_img, cv::Size(window_width_, window_height_));
-                    cv::imshow(feature_window_name_, feature_img);
-                    cv::moveWindow(feature_window_name_, window_pos_x_ + window_width_ + 10, window_pos_y_);
-                }
-
-                // 매칭 결과 표시
-                if (show_matches_) {
-                    cv::Mat matches_img;
-                    cv::drawMatches(prev_frame_, prev_features_.keypoints,
-                                  rgb, features.keypoints,
-                                  matches.matches, matches_img,
-                                  cv::Scalar::all(-1), cv::Scalar::all(-1),
-                                  std::vector<char>(),
-                                  cv::DrawMatchesFlags::DEFAULT);
-                    cv::resize(matches_img, matches_img, cv::Size(window_width_, window_height_));
-                    cv::imshow(matches_window_name_, matches_img);
-                    cv::moveWindow(matches_window_name_, 
-                                 window_pos_x_ + 2 * (window_width_ + 10), 
-                                 window_pos_y_);
-                }
-                
-                cv::waitKey(1);
-            }
-
-            // 결과 발행
-            publishResults(features, matches);
+            auto match_start = std::chrono::steady_clock::now();
+            matches = feature_detector_.matchFeatures(prev_features_, features);
+            feature_matching_time = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - match_start).count();
         }
+
+        // 시각화 시간 측정
+        auto viz_start = std::chrono::steady_clock::now();
+        if (show_original_ || show_features_ || show_matches_) {
+            // 원본 이미지 처리 시간
+            auto orig_start = std::chrono::steady_clock::now();
+            if (show_original_) {
+                cv::Mat resized = rgb.clone();
+                cv::resize(resized, resized, cv::Size(window_width_, window_height_));
+                cv::imshow(original_window_name_, resized);
+                cv::moveWindow(original_window_name_, window_pos_x_, window_pos_y_);
+            }
+            auto orig_time = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - orig_start).count();
+
+            // 특징점 처리 시간
+            auto feat_start = std::chrono::steady_clock::now();
+            if (show_features_) {
+                cv::Mat feature_img = rgb.clone();
+                for (const auto& kp : features.keypoints) {
+                    cv::circle(feature_img, kp.pt, 3, cv::Scalar(0, 255, 0), -1);
+                }
+                cv::resize(feature_img, feature_img, cv::Size(window_width_, window_height_));
+                cv::imshow(feature_window_name_, feature_img);
+                cv::moveWindow(feature_window_name_, window_pos_x_ + window_width_ + 10, window_pos_y_);
+            }
+            auto feat_time = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - feat_start).count();
+
+            // 매칭 처리 시간
+            auto match_start = std::chrono::steady_clock::now();
+            if (show_matches_ && !prev_frame_.empty()) {
+                cv::Mat matches_img;
+                cv::drawMatches(prev_frame_, prev_features_.keypoints,
+                              rgb, features.keypoints,
+                              matches.matches, matches_img,
+                              cv::Scalar::all(-1), cv::Scalar::all(-1),
+                              std::vector<char>(),
+                              cv::DrawMatchesFlags::DEFAULT);
+                cv::resize(matches_img, matches_img, cv::Size(window_width_, window_height_));
+                cv::imshow(matches_window_name_, matches_img);
+                cv::moveWindow(matches_window_name_, 
+                             window_pos_x_ + 2 * (window_width_ + 10), 
+                             window_pos_y_);
+            }
+            auto match_time = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - match_start).count();
+            
+            cv::waitKey(1);
+        }
+        visualization_time = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - viz_start).count();
 
         // 현재 프레임 저장
         prev_frame_ = rgb.clone();
         prev_features_ = features;
 
-        RCLCPP_INFO(this->get_logger(), 
-            "Frame processed: %d features detected", 
-            static_cast<int>(features.keypoints.size()));
+        // 통계 업데이트
+        frame_count++;
+
+        // 1초마다 로그 출력
+        auto current_time = this->now();
+        if ((current_time - last_log_time).seconds() >= 1.0) {
+            double elapsed_time = (current_time - last_log_time).seconds();
+            double fps = frame_count / elapsed_time;
+            
+            RCLCPP_INFO(this->get_logger(), 
+                "\n[Processing Performance]"
+                "\n- Feature Detection | FPS: %.1f | Time: %.1f ms"
+                "\n- Feature Matching  | FPS: %.1f | Time: %.1f ms"
+                "\n- Visualization     | FPS: %.1f | Time: %.1f ms"
+                "\n[Detection Results]"
+                "\n- Total Features: %d"
+                "\n- Total Matches: %d",
+                fps, feature_detection_time,
+                fps, feature_matching_time,
+                fps, visualization_time,
+                static_cast<int>(features.keypoints.size()),
+                static_cast<int>(matches.matches.size()));
+
+            // 통계 초기화
+            frame_count = 0;
+            last_log_time = current_time;
+        }
     }
     catch (const std::exception& e) {
         RCLCPP_ERROR(this->get_logger(), "Error in processImages: %s", e.what());
