@@ -179,6 +179,10 @@ void VisualOdometryNode::declareParameters()
     // 파라미터 값 로깅
     show_matches_ = this->get_parameter("visualization.windows.show_matches").as_bool();
     RCLCPP_INFO(this->get_logger(), "Initialized show_matches_: %s", show_matches_ ? "true" : "false");
+
+    // 특징점 검출 파라미터 초기화
+    max_features_ = this->get_parameter("feature_detector.max_features").as_int();
+    fast_threshold_ = this->get_parameter("feature_detector.fast_threshold").as_int();
 }
 
 void VisualOdometryNode::applyCurrentParameters() {
@@ -313,24 +317,16 @@ rcl_interfaces::msg::SetParametersResult VisualOdometryNode::onParamChange(
     return result;
 }
 
-void VisualOdometryNode::cameraInfoCallback(
-    const sensor_msgs::msg::CameraInfo::SharedPtr msg)
-{
+void VisualOdometryNode::cameraInfoCallback(const sensor_msgs::msg::CameraInfo::SharedPtr msg) {
     try {
         if (!camera_info_received_) {
-            // 카메라 행렬 초기화
-            camera_params_.K = cv::Mat(3, 3, CV_64F);
-            camera_params_.K.at<double>(0,0) = msg->k[0];  // fx
-            camera_params_.K.at<double>(1,1) = msg->k[4];  // fy
-            camera_params_.K.at<double>(0,2) = msg->k[2];  // cx
-            camera_params_.K.at<double>(1,2) = msg->k[5];  // cy
-            camera_params_.K.at<double>(2,2) = 1.0;
-
-            // 왜곡 계수 초기화
-            camera_params_.D = cv::Mat(msg->d.size(), 1, CV_64F);
-            for (size_t i = 0; i < msg->d.size(); ++i) {
-                camera_params_.D.at<double>(i) = msg->d[i];
-            }
+            // 카메라 파라미터 설정
+            camera_params_.fx = msg->k[0];  // fx
+            camera_params_.fy = msg->k[4];  // fy
+            camera_params_.cx = msg->k[2];  // cx
+            camera_params_.cy = msg->k[5];  // cy
+            camera_params_.width = msg->width;
+            camera_params_.height = msg->height;
 
             camera_info_received_ = true;
             RCLCPP_INFO(this->get_logger(), "Camera parameters received");
@@ -417,143 +413,60 @@ void VisualOdometryNode::processImages(const cv::Mat& rgb, const cv::Mat& depth)
     try {
         start_time_ = std::chrono::steady_clock::now();
         
-        // 연산 활성화 상태 확인
-        bool enable_detection = this->get_parameter("processing.enable_feature_detection").as_bool();
-        bool enable_matching = this->get_parameter("processing.enable_feature_matching").as_bool();
-        bool enable_visualization = this->get_parameter("visualization.enable").as_bool();
+        // 이전 비동기 작업이 완료될 때까지 대기
+        if (viz_future_.valid()) viz_future_.wait();
+        if (pub_future_.valid()) pub_future_.wait();
+
+        // 이미지 스케일링 (성능 향상을 위해)
+        double image_scale = this->get_parameter("feature_detector.image_scale").as_double();
+        if (working_frame_.empty() || working_frame_.size() != cv::Size(rgb.cols * image_scale, rgb.rows * image_scale)) {
+            working_frame_.create(cv::Size(rgb.cols * image_scale, rgb.rows * image_scale), rgb.type());
+            gray_buffer_.create(working_frame_.size(), CV_8UC1);
+        }
         
-        Features curr_features;
+        // 이미지 크기 조정 및 그레이스케일 변환
+        cv::resize(rgb, working_frame_, working_frame_.size());
+        cv::cvtColor(working_frame_, gray_buffer_, cv::COLOR_BGR2GRAY);
+
+        // 특징점 검출 (그레이스케일 이미지 사용)
+        Features curr_features = feature_detector_.detectFeatures(
+            gray_buffer_, max_features_, fast_threshold_);
+        
+        // 매칭 수행 (첫 프레임이 아닐 때만)
         FeatureMatches matches;
-        
-        // 특징점 검출 (활성화된 경우만)
-        if (enable_detection) {
-            double image_scale = this->get_parameter("feature_detector.image_scale").as_double();
-            int max_features = this->get_parameter("feature_detector.max_features").as_int();
-            int fast_threshold = this->get_parameter("feature_detector.fast_threshold").as_int();
-            
-            // 작업용 프레임 준비
-            cv::resize(rgb, working_frame_, cv::Size(), image_scale, image_scale);
-            
-            static cv::Mat gray;
-            cv::cvtColor(working_frame_, gray, cv::COLOR_BGR2GRAY);
-            
-            curr_features = feature_detector_.detectFeatures(gray, max_features, fast_threshold);
-            
-            // 특징점 매칭 (활성화된 경우만)
-            if (enable_matching && !prev_features_.keypoints.empty()) {
-                float ratio_threshold = this->get_parameter(
-                    "feature_detector.matching.ratio_threshold").as_double();
-                bool cross_check = this->get_parameter(
-                    "feature_detector.matching.cross_check").as_bool();
-                
-                matches = feature_detector_.matchFeatures(
-                    prev_features_, curr_features, ratio_threshold, cross_check);
-                
-                // 매칭 로그를 DEBUG 레벨로 변경
-                RCLCPP_DEBUG(this->get_logger(),
-                    "Matching: %zu features matched between frames",
-                    matches.matches.size());
-            }
-            
-            // 현재 프레임을 이전 프레임으로 저장
-            prev_features_ = curr_features;
-            working_frame_.copyTo(prev_frame_);
-            first_frame_ = false;
+        if (!first_frame_) {
+            matches = feature_detector_.matchFeatures(prev_features_, curr_features);
         }
 
-        // 시각화 (활성화된 경우만)
-        if (enable_visualization) {
-            bool show_original = this->get_parameter("visualization.windows.show_original").as_bool();
-            bool show_features = this->get_parameter("visualization.windows.show_features").as_bool();
-            bool show_matches = this->get_parameter("visualization.windows.show_matches").as_bool();
-            
-            updateVisualization(rgb, curr_features, matches);
+        // 현재 프레임을 이전 프레임으로 저장
+        prev_features_ = curr_features;
+        first_frame_ = false;
+
+        // 시각화 및 결과 발행은 별도 스레드에서 처리
+        if (show_original_ || show_features_ || show_matches_) {
+            viz_future_ = std::async(std::launch::async, [this, curr_features, matches]() {
+                updateVisualization(working_frame_, curr_features, matches);
+            });
         }
 
-        // 결과 발행 (활성화된 경우만)
         if (this->get_parameter("processing.publish_results").as_bool()) {
-            publishResults(curr_features, matches);
+            pub_future_ = std::async(std::launch::async, [this, curr_features, matches]() {
+                publishResults(curr_features, matches);
+            });
         }
 
-        // 시간 계산 (milliseconds로 변환)
-        auto to_ms = [](auto duration) {
-            return std::chrono::duration<double, std::milli>(duration).count();
-        };
+        // FPS 및 성능 측정
+        double total_duration = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - start_time_).count();
 
-        double total_duration = to_ms(std::chrono::steady_clock::now() - start_time_);
+        // 로그 출력
+        RCLCPP_INFO(this->get_logger(), 
+            "Processing time: %.1f ms, Features: %zu, Matches: %zu",
+            total_duration,
+            curr_features.keypoints.size(),
+            matches.matches.size());
 
-        // 현재 시간 가져오기
-        auto current_time = this->now();
-
-        // 원본 이미지 FPS 계산 및 표시
-        if (show_original_) {
-            original_frame_times_.push_back(current_time.seconds());
-            if (original_frame_times_.size() > static_cast<size_t>(fps_window_size_)) {
-                original_frame_times_.pop_front();
-            }
-            if (original_frame_times_.size() >= 2) {
-                double time_diff = original_frame_times_.back() - original_frame_times_.front();
-                original_fps_ = (original_frame_times_.size() - 1) / time_diff;
-
-                // 화면에 FPS 표시
-                std::string fps_text = cv::format("FPS: %.1f", original_fps_);
-                cv::putText(display_frame_original_, fps_text, 
-                           cv::Point(10, 30), cv::FONT_HERSHEY_SIMPLEX, 
-                           1.0, cv::Scalar(0, 255, 0), 2);
-            }
-        }
-
-        // 특징점 검출 FPS 계산 및 표시
-        if (show_features_) {
-            feature_frame_times_.push_back(current_time.seconds());
-            if (feature_frame_times_.size() > static_cast<size_t>(fps_window_size_)) {
-                feature_frame_times_.pop_front();
-            }
-            if (feature_frame_times_.size() >= 2) {
-                double time_diff = feature_frame_times_.back() - feature_frame_times_.front();
-                feature_fps_ = (feature_frame_times_.size() - 1) / time_diff;
-
-                // 화면에 FPS 표시
-                std::string fps_text = cv::format("FPS: %.1f", feature_fps_);
-                cv::putText(display_frame_features_, fps_text, 
-                           cv::Point(10, 30), cv::FONT_HERSHEY_SIMPLEX, 
-                           1.0, cv::Scalar(0, 255, 0), 2);
-            }
-        }
-
-        // FPS 및 타이밍 정보 출력 (1초마다)
-        if ((current_time - last_fps_print_time_).seconds() >= 1.0) {
-            RCLCPP_INFO(this->get_logger(), 
-                       "FPS - Original: %.1f, Features: %.1f, Matches: %.1f (Processing: %.1f ms, ZED: %.1f ms)",
-                       original_fps_,
-                       feature_fps_,
-                       static_cast<double>(matches.matches.size()) / total_duration * 1000.0,  // 매칭 FPS 계산
-                       total_duration,
-                       zed_acquisition_time_);
-            last_fps_print_time_ = current_time;
-
-            // 타이밍 정보도 출력
-            RCLCPP_INFO(this->get_logger(),
-                        "Timing breakdown:\n"
-                        "  Total: %.1f ms\n"
-                        "  Matches: %zu",
-                        total_duration,
-                        matches.matches.size());
-        }
-
-        // 특징점 시각화 이미지 발행
-        if (feature_img_pub_->get_subscription_count() > 0 && !curr_features.keypoints.empty()) {
-            std_msgs::msg::Header header;
-            header.stamp = this->now();
-            header.frame_id = "zed_camera";
-            
-            sensor_msgs::msg::Image::SharedPtr feature_msg = 
-                cv_bridge::CvImage(header, "bgr8", 
-                                 curr_features.visualization).toImageMsg();
-            feature_img_pub_->publish(*feature_msg);
-        }
-    }
-    catch (const std::exception& e) {
+    } catch (const std::exception& e) {
         RCLCPP_ERROR(this->get_logger(), "Error in processImages: %s", e.what());
     }
 }
@@ -601,98 +514,112 @@ void VisualOdometryNode::processingLoop() {
     }
 }
 
-void VisualOdometryNode::updateVisualization(const cv::Mat& rgb, 
+void VisualOdometryNode::updateVisualization(const cv::Mat& frame,
                                            const Features& features,
                                            const FeatureMatches& matches) {
-    std::lock_guard<std::mutex> lock(frame_mutex_);
-    
-    // 원본 이미지 시각화
-    if (show_original_) {
-        cv::resize(rgb, display_frame_original_,
-                  cv::Size(window_width_, window_height_));
-    }
-    
-    // 특징점 시각화
-    if (show_features_ && !features.visualization.empty()) {
-        cv::resize(features.visualization, display_frame_features_,
-                  cv::Size(window_width_, window_height_));
-    }
-    
-    // 매칭 결과 시각화
-    if (show_matches_ && !matches.matches.empty() && !prev_frame_.empty()) {
-        try {
-            // 매칭 결과 시각화를 위한 임시 이미지
-            cv::Mat match_vis;
-            
-            // 유효한 매칭만 필터링
-            std::vector<cv::DMatch> good_matches;
-            for (const auto& match : matches.matches) {
-                if (match.queryIdx < prev_features_.keypoints.size() &&
-                    match.trainIdx < features.keypoints.size()) {
-                    good_matches.push_back(match);
-                }
-            }
-            
-            if (!good_matches.empty()) {
-                cv::drawMatches(prev_frame_, prev_features_.keypoints,
-                              working_frame_, features.keypoints,
-                              good_matches, match_vis,
-                              cv::Scalar::all(-1), cv::Scalar::all(-1),
-                              std::vector<char>(),
-                              cv::DrawMatchesFlags::NOT_DRAW_SINGLE_POINTS);
-                
-                cv::resize(match_vis, display_frame_matches_,
-                          cv::Size(window_width_, window_height_));
-            }
+    try {
+        std::lock_guard<std::mutex> lock(frame_mutex_);  // 스레드 안전성 보장
+
+        // 버퍼 재사용을 위한 크기 확인 및 할당
+        cv::Size display_size(window_width_, window_height_);
+        
+        if (display_frame_original_.empty() || display_frame_original_.size() != display_size) {
+            display_frame_original_.create(display_size, CV_8UC3);
         }
-        catch (const cv::Exception& e) {
-            RCLCPP_WARN(this->get_logger(), 
-                "Failed to visualize matches: %s", e.what());
+        if (display_frame_features_.empty() || display_frame_features_.size() != display_size) {
+            display_frame_features_.create(display_size, CV_8UC3);
         }
+        if (display_frame_matches_.empty() || display_frame_matches_.size() != display_size) {
+            display_frame_matches_.create(display_size, CV_8UC3);
+        }
+
+        // 원본 이미지 표시
+        if (show_original_) {
+            cv::resize(frame, display_frame_original_, display_size);
+            cv::imshow(original_window_name_, display_frame_original_);
+            cv::moveWindow(original_window_name_, window_pos_x_, window_pos_y_);
+        }
+
+        // 특징점 표시
+        if (show_features_) {
+            frame.copyTo(display_frame_features_);
+            for (const auto& kp : features.keypoints) {
+                cv::circle(display_frame_features_, kp.pt, 3, cv::Scalar(0, 255, 0), -1);
+            }
+            cv::resize(display_frame_features_, display_frame_features_, display_size);
+            cv::imshow(feature_window_name_, display_frame_features_);
+            cv::moveWindow(feature_window_name_, 
+                         window_pos_x_ + window_width_ + 10, 
+                         window_pos_y_);
+        }
+
+        // 매칭 결과 표시
+        if (show_matches_ && !matches.matches.empty()) {
+            frame.copyTo(display_frame_matches_);
+            for (size_t i = 0; i < matches.matches.size(); i++) {
+                cv::line(display_frame_matches_,
+                        matches.prev_points[i],
+                        matches.curr_points[i],
+                        cv::Scalar(0, 255, 0), 2);
+                cv::circle(display_frame_matches_,
+                          matches.curr_points[i], 3,
+                          cv::Scalar(0, 0, 255), -1);
+            }
+            cv::resize(display_frame_matches_, display_frame_matches_, display_size);
+            cv::imshow(matches_window_name_, display_frame_matches_);
+            cv::moveWindow(matches_window_name_,
+                         window_pos_x_ + 2 * (window_width_ + 10),
+                         window_pos_y_);
+        }
+
+        cv::waitKey(1);
+    } catch (const std::exception& e) {
+        RCLCPP_ERROR(this->get_logger(), "Error in updateVisualization: %s", e.what());
     }
 }
 
 void VisualOdometryNode::publishResults(const Features& features, 
                                       const FeatureMatches& matches) {
-    // 특징점 이미지 발행
-    if (feature_img_pub_->get_subscription_count() > 0 && !features.visualization.empty()) {
-        std_msgs::msg::Header header;
-        header.stamp = this->now();
-        header.frame_id = "camera_frame";
+    try {
+        auto current_time = this->now();
         
-        sensor_msgs::msg::Image::SharedPtr feature_msg = 
-            cv_bridge::CvImage(header, "bgr8", features.visualization).toImageMsg();
-        feature_img_pub_->publish(*feature_msg);
-    }
-    
-    // VO 상태 메시지 발행
-    if (vo_state_pub_->get_subscription_count() > 0) {
-        auto msg = visual_odometry::msg::VOState();
-        msg.header.stamp = this->now();
-        msg.header.frame_id = "camera_frame";
-        
-        // 특징점 정보 설정
-        msg.num_features = features.keypoints.size();
-        msg.num_matches = matches.matches.size();
-        
-        // 품질 메트릭 계산
-        float tracking_quality = 0.0f;
-        if (!features.keypoints.empty()) {
-            tracking_quality = static_cast<float>(matches.matches.size()) / 
-                             static_cast<float>(features.keypoints.size());
+        // VO 상태 메시지 발행 (더 가벼운 메시지부터 처리)
+        if (vo_state_pub_->get_subscription_count() > 0) {
+            auto msg = visual_odometry::msg::VOState();
+            msg.header.stamp = current_time;
+            msg.header.frame_id = "camera_frame";
+            
+            // 기본 정보 설정
+            msg.num_features = features.keypoints.size();
+            msg.num_matches = matches.matches.size();
+            
+            // 품질 메트릭 계산 (0.0 ~ 1.0)
+            msg.tracking_quality = features.keypoints.empty() ? 0.0f :
+                static_cast<float>(matches.matches.size()) / 
+                static_cast<float>(features.keypoints.size());
+            
+            // 처리 시간 설정
+            msg.processing_time = static_cast<float>(
+                std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - start_time_).count());
+            
+            vo_state_pub_->publish(msg);
         }
-        msg.tracking_quality = tracking_quality;
-        
-        // TODO: 스케일 신뢰도와 포즈 추정은 나중에 구현
-        msg.scale_confidence = 0.0f;
-        
-        // 처리 시간 설정 - processImages에서 계산된 값 사용
-        auto current_time = std::chrono::steady_clock::now();
-        double processing_time = std::chrono::duration<double, std::milli>(
-            current_time - start_time_).count();
-        msg.processing_time = static_cast<float>(processing_time);
-        
-        vo_state_pub_->publish(msg);
+
+        // 특징점 이미지 발행 (구독자가 있을 때만)
+        if (feature_img_pub_->get_subscription_count() > 0 && 
+            !features.visualization.empty()) {
+            
+            sensor_msgs::msg::Image::SharedPtr feature_msg = 
+                cv_bridge::CvImage(std_msgs::msg::Header(), "bgr8", 
+                                 features.visualization).toImageMsg();
+            feature_msg->header.stamp = current_time;
+            feature_msg->header.frame_id = "camera_frame";
+            
+            feature_img_pub_->publish(*feature_msg);
+        }
+    } catch (const std::exception& e) {
+        RCLCPP_ERROR(this->get_logger(), "Error in publishResults: %s", e.what());
     }
 }
 

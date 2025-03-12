@@ -1,9 +1,12 @@
 cmake_minimum_required(VERSION 3.8)
 project(visual_odometry)
 
-# CUDA 설정 추가
+# CUDA 설정
 find_package(CUDA REQUIRED)
-include_directories(${CUDA_INCLUDE_DIRS})
+if(CUDA_FOUND)
+    message(STATUS "CUDA found: ${CUDA_VERSION}")
+    add_definitions(-DWITH_CUDA)
+endif()
 
 # 컴파일러 설정
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
@@ -44,6 +47,8 @@ include_directories(
   ${OpenCV_INCLUDE_DIRS}
   ${CUDA_INCLUDE_DIRS}
   ${ZED_INCLUDE_DIRS}
+  /usr/local/zed/include      # ZED SDK 헤더 경로 추가
+  ${CMAKE_INSTALL_PREFIX}/include  # 생성된 메시지 헤더 경로
 )
 
 # 소스 파일 목록

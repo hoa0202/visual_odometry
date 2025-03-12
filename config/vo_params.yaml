@@ -20,31 +20,42 @@
     processing:
       enable_feature_detection: true   # 특징점 검출 활성화
       enable_feature_matching: true    # 특징점 매칭 활성화
-      enable_pose_estimation: true     # 포즈 추정 활성화
+      enable_pose_estimation: false     # 포즈 추정 활성화
       publish_results: true            # 결과 토픽 발행 활성화
 
     # Feature Detector Parameters (연산 파라미터)
     feature_detector:
-      max_features: 500
-      scale_factor: 1.2
-      n_levels: 8
-      fast_threshold: 25
-      image_scale: 0.2
+      max_features: 500              # 최대 특징점 개수
+      scale_factor: 1.2             # 스케일 팩터
+      n_levels: 8                   # 피라미드 레벨 수
+      fast_threshold: 25            # FAST 임계값
+      image_scale: 0.2              # 이미지 스케일
+      min_distance: 15              # 특징점 간 최소 거리
+      quality_level: 0.01           # 특징점 품질 레벨 (0.001-0.1)
       matching:
-        ratio_threshold: 0.8
-        cross_check: false
+        ratio_threshold: 0.8        # 매칭 비율 임계값
+        cross_check: false          # 교차 검사 사용 여부
+        max_distance: 50            # 매칭점 간 최대 거리 (픽셀)
+        min_matches: 10             # 최소 매칭 개수
+        ransac:
+          threshold: 3.0            # RANSAC 임계값 (픽셀)
+          confidence: 0.99          # RANSAC 신뢰도 (0.9-0.99)
+          max_iterations: 1000      # 최대 반복 횟수
 
     # Visualization Parameters (시각화 설정)
     visualization:
-      enable: true                    # 전체 시각화 활성화/비활성화
-      window_width: 800
-      window_height: 600
-      window_pos_x: 100
-      window_pos_y: 100
+      enable: true                  # 전체 시각화 활성화/비활성화
+      window_width: 800             # 윈도우 너비 (400-1920)
+      window_height: 600            # 윈도우 높이 (300-1080)
+      window_pos_x: 100             # 윈도우 X 위치 (0-1920)
+      window_pos_y: 100             # 윈도우 Y 위치 (0-1080)
+      fps_window_size: 60           # FPS 계산 윈도우 크기 (30-120)
+      feature_size: 3               # 특징점 크기 (1-10)
+      line_thickness: 2             # 선 두께 (1-5)
       windows:
-        show_original: false           # 원본 이미지 윈도우
-        show_features: false           # 특징점 윈도우
-        show_matches: false            # 매칭 윈도우
+        show_original: true         # 원본 이미지 윈도우
+        show_features: true         # 특징점 윈도우
+        show_matches: true          # 매칭 윈도우
       window_names:
         original: "Original Image"
         features: "Feature Detection"

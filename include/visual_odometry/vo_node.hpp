@@ -17,6 +17,7 @@
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include "visual_odometry/msg/vo_state.hpp"
 #include <chrono>
+#include <future>  // std::async를 위해 추가
 
 namespace vo {
 
@@ -145,6 +146,14 @@ private:
 
     // 결과 발행 함수 선언
     void publishResults(const Features& features, const FeatureMatches& matches);
+
+    // 특징점 검출 파라미터
+    int max_features_{500};  // 기본값 500
+    int fast_threshold_{25}; // 기본값 25
+
+    // 비동기 작업 관리를 위한 변수들
+    std::future<void> viz_future_;
+    std::future<void> pub_future_;
 };
 
 } // namespace vo 
