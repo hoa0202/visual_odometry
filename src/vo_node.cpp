@@ -5,7 +5,7 @@
 
 namespace vo {
 
-VisualOdometryNode::VisualOdometryNode()
+VisualOdometryNode::VisualOdometryNode() 
     : Node("visual_odometry_node",
            rclcpp::NodeOptions().use_intra_process_comms(true)),
       original_fps_(0.0),
@@ -13,8 +13,8 @@ VisualOdometryNode::VisualOdometryNode()
       zed_acquisition_time_(0.0) {
     try {
         // 1. 파라미터 선언
-        declareParameters();
-        
+    declareParameters();
+    
         // 2. 시각화 관련 파라미터만 먼저 적용
         window_width_ = this->get_parameter("visualization.window_width").as_int();
         window_height_ = this->get_parameter("visualization.window_height").as_int();
@@ -31,8 +31,8 @@ VisualOdometryNode::VisualOdometryNode()
         }
 
         // 4. 나머지 파라미터 적용
-        applyCurrentParameters();
-
+    applyCurrentParameters();
+    
         // QoS 프로파일 설정
         auto qos = rclcpp::QoS(1).best_effort().durability_volatile();
 
@@ -42,21 +42,21 @@ VisualOdometryNode::VisualOdometryNode()
         std::string camera_info_topic = this->get_parameter("topics.camera_info").as_string();
         std::string feature_topic = this->get_parameter("topics.feature_image").as_string();
 
-        // Subscribers
-        rgb_sub_ = this->create_subscription<sensor_msgs::msg::Image>(
+    // Subscribers
+    rgb_sub_ = this->create_subscription<sensor_msgs::msg::Image>(
             rgb_topic, qos,
-            std::bind(&VisualOdometryNode::rgbCallback, this, std::placeholders::_1));
+        std::bind(&VisualOdometryNode::rgbCallback, this, std::placeholders::_1));
 
-        depth_sub_ = this->create_subscription<sensor_msgs::msg::Image>(
+    depth_sub_ = this->create_subscription<sensor_msgs::msg::Image>(
             depth_topic, 10,
-            std::bind(&VisualOdometryNode::depthCallback, this, std::placeholders::_1));
+        std::bind(&VisualOdometryNode::depthCallback, this, std::placeholders::_1));
 
-        camera_info_sub_ = this->create_subscription<sensor_msgs::msg::CameraInfo>(
+    camera_info_sub_ = this->create_subscription<sensor_msgs::msg::CameraInfo>(
             camera_info_topic, 10,
-            std::bind(&VisualOdometryNode::cameraInfoCallback, this, std::placeholders::_1));
+        std::bind(&VisualOdometryNode::cameraInfoCallback, this, std::placeholders::_1));
 
         // Publishers
-        feature_img_pub_ = this->create_publisher<sensor_msgs::msg::Image>(
+    feature_img_pub_ = this->create_publisher<sensor_msgs::msg::Image>(
             feature_topic, 10);
         pose_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(
             "camera_pose", 10);
@@ -93,7 +93,7 @@ VisualOdometryNode::VisualOdometryNode()
         // 이미지 처리 스레드 시작
         processing_thread_ = std::thread(&VisualOdometryNode::processingLoop, this);
 
-        RCLCPP_INFO(this->get_logger(), "Visual Odometry Node has been initialized");
+    RCLCPP_INFO(this->get_logger(), "Visual Odometry Node has been initialized");
     }
     catch (const std::exception& e) {
         RCLCPP_ERROR(this->get_logger(), "Error in constructor: %s", e.what());
@@ -202,18 +202,18 @@ void VisualOdometryNode::applyCurrentParameters() {
 
         // Feature Detector 파라미터는 feature_detector_가 초기화된 후에만 적용
         if (feature_detector_) {
-            int max_features = this->get_parameter("feature_detector.max_features").as_int();
-            double scale_factor = this->get_parameter("feature_detector.scale_factor").as_double();
-            int n_levels = this->get_parameter("feature_detector.n_levels").as_int();
-            
+    int max_features = this->get_parameter("feature_detector.max_features").as_int();
+    double scale_factor = this->get_parameter("feature_detector.scale_factor").as_double();
+    int n_levels = this->get_parameter("feature_detector.n_levels").as_int();
+    
             // Feature Detector 파라미터 로깅
             RCLCPP_INFO(this->get_logger(), 
                         "Feature Detector Parameters:"
                         "\n  - max_features: %d"
                         "\n  - scale_factor: %.2f"
                         "\n  - n_levels: %d",
-                        max_features, scale_factor, n_levels);
-            
+                max_features, scale_factor, n_levels);
+    
             feature_detector_->setMaxFeatures(max_features);
             feature_detector_->setScaleFactor(scale_factor);
             feature_detector_->setNLevels(n_levels);
@@ -468,7 +468,12 @@ void VisualOdometryNode::processImages(const cv::Mat& rgb, const cv::Mat& depth)
                         }
 
                         if (valid_matches && !matches.matches.empty()) {
-                            cv::Mat matches_img;
+                            cv::Mat prev_resized, curr_resized;
+                            cv::resize(prev_frame_, prev_resized, 
+                                     cv::Size(window_width_, window_height_));
+                            cv::resize(rgb, curr_resized, 
+                                     cv::Size(window_width_, window_height_));
+
                             std::vector<cv::DMatch> good_matches;
                             
                             // 유효한 매치만 필터링
@@ -490,41 +495,32 @@ void VisualOdometryNode::processImages(const cv::Mat& rgb, const cv::Mat& depth)
                             }
 
                             if (!good_matches.empty()) {
-                                // 이미지 크기 조정
-                                cv::Mat prev_resized, curr_resized;
-                                cv::resize(prev_frame_, prev_resized, 
-                                         cv::Size(window_width_, window_height_));
-                                cv::resize(rgb, curr_resized, 
-                                         cv::Size(window_width_, window_height_));
+                                // 1. 이미지 준비
+                                cv::Mat combined_img;
+                                cv::hconcat(prev_resized, curr_resized, combined_img);  // 두 이미지를 가로로 연결
 
-                                // 매칭 그리기
-                                cv::drawMatches(prev_resized, prev_features_.keypoints,
-                                              curr_resized, features.keypoints,
-                                              good_matches, matches_img,
-                                              cv::Scalar(0, 255, 0),  // 매칭 선 색상 (녹색)
-                                              cv::Scalar(255, 0, 0),  // 키포인트 색상 (파란색)
-                                              std::vector<char>(),    // 마스크
-                                              cv::DrawMatchesFlags::DRAW_RICH_KEYPOINTS |
-                                              cv::DrawMatchesFlags::NOT_DRAW_SINGLE_POINTS);
-
-                                // 매칭 선 두께 조정을 위한 후처리
-                                cv::Mat overlay = matches_img.clone();
+                                // 2. 매칭 선 그리기
                                 for (const auto& match : good_matches) {
+                                    // 이전 프레임의 특징점 좌표
                                     cv::Point2f pt1 = prev_features_.keypoints[match.queryIdx].pt;
+                                    pt1.x = pt1.x * window_width_ / prev_frame_.cols;
+                                    pt1.y = pt1.y * window_height_ / prev_frame_.rows;
+
+                                    // 현재 프레임의 특징점 좌표
                                     cv::Point2f pt2 = features.keypoints[match.trainIdx].pt;
-                                    // 크기 조정된 좌표로 변환
-                                    pt1.x *= static_cast<float>(window_width_) / prev_frame_.cols;
-                                    pt1.y *= static_cast<float>(window_height_) / prev_frame_.rows;
-                                    pt2.x *= static_cast<float>(window_width_) / rgb.cols;
-                                    pt2.y *= static_cast<float>(window_height_) / rgb.rows;
-                                    pt2.x += window_width_;  // 오른쪽 이미지의 좌표 조정
-                                    cv::line(overlay, pt1, pt2, cv::Scalar(0, 255, 0), 2);
+                                    pt2.x = (pt2.x * window_width_ / rgb.cols) + window_width_;  // 오른쪽 이미지에 맞게 x 좌표 조정
+                                    pt2.y = pt2.y * window_height_ / rgb.rows;
+
+                                    // 매칭 선 그리기
+                                    cv::line(combined_img, pt1, pt2, cv::Scalar(0, 255, 0), 2);
+
+                                    // 특징점 그리기
+                                    cv::circle(combined_img, pt1, 3, cv::Scalar(255, 0, 0), -1);
+                                    cv::circle(combined_img, pt2, 3, cv::Scalar(255, 0, 0), -1);
                                 }
-                                
-                                cv::addWeighted(overlay, 0.5, matches_img, 0.5, 0, matches_img);
-                                
-                                // 결과 저장
-                                display_frame_matches_ = matches_img.clone();
+
+                                // 3. 결과 저장
+                                display_frame_matches_ = combined_img.clone();
                             }
                         }
                     }
@@ -532,8 +528,8 @@ void VisualOdometryNode::processImages(const cv::Mat& rgb, const cv::Mat& depth)
                         RCLCPP_ERROR(this->get_logger(), "OpenCV error in visualization: %s", e.what());
                     }
                 }
-            }
-            catch (const cv::Exception& e) {
+    }
+    catch (const cv::Exception& e) {
                 RCLCPP_ERROR(this->get_logger(), "OpenCV error in visualization: %s", e.what());
             }
 
