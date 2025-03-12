@@ -47,43 +47,46 @@ FeatureDetector::FeatureDetector() {
 Features FeatureDetector::detectFeatures(const cv::Mat& frame, 
                                        int max_features,
                                        int fast_threshold) {
-    Features current_features;
+    Features result;
     
-    // 현재 프레임 특징점 검출
-    keypoints_buffer_.clear();
-    detector_->setThreshold(fast_threshold);
-    detector_->detect(frame, keypoints_buffer_);
-    
-    // 최대 특징점 수 제한
-    if (keypoints_buffer_.size() > static_cast<size_t>(max_features)) {
-        std::sort(keypoints_buffer_.begin(), keypoints_buffer_.end(),
-                 [](const cv::KeyPoint& a, const cv::KeyPoint& b) {
-                     return a.response > b.response;
-                 });
-        keypoints_buffer_.resize(max_features);
+    try {
+        // 이미지 전처리 최적화
+        cv::Mat gray;
+        if (frame.channels() == 3) {
+            cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
+        } else {
+            gray = frame;
+        }
+
+        // FAST 검출기 파라미터 최적화
+        std::vector<cv::KeyPoint> keypoints;
+        cv::FAST(gray, keypoints, fast_threshold, true);  // true: non-max suppression 활성화
+
+        // 최적의 특징점 선택
+        if (keypoints.size() > static_cast<size_t>(max_features)) {
+            // 품질 기반 정렬
+            std::sort(keypoints.begin(), keypoints.end(),
+                     [](const cv::KeyPoint& a, const cv::KeyPoint& b) {
+                         return a.response > b.response;
+                     });
+            keypoints.resize(max_features);
+        }
+
+        // 특징점 계산
+        cv::Mat descriptors;
+        if (!keypoints.empty()) {
+            descriptor_->compute(gray, keypoints, descriptors);
+        }
+
+        result.keypoints = std::move(keypoints);
+        result.descriptors = std::move(descriptors);
+        
+    } catch (const std::exception& e) {
+        RCLCPP_ERROR(rclcpp::get_logger("feature_detector"), 
+                    "Error in detectFeatures: %s", e.what());
     }
-    
-    // 디스크립터 계산
-    descriptor_->compute(frame, keypoints_buffer_, descriptors_buffer_);
-    
-    // 현재 특징점 저장
-    current_features.keypoints = keypoints_buffer_;
-    current_features.descriptors = descriptors_buffer_;
 
-    // 첫 프레임이면 이전 프레임으로 저장하고 리턴
-    if (first_frame_) {
-        prev_features_ = current_features;
-        first_frame_ = false;
-        return current_features;
-    }
-
-    // 이전 프레임과 매칭
-    auto matches = matchFeatures(prev_features_, current_features);
-
-    // 현재 프레임을 이전 프레임으로 저장
-    prev_features_ = current_features;
-    
-    return current_features;
+    return result;
 }
 
 FeatureMatches FeatureDetector::matchFeatures(const Features& prev_features,
