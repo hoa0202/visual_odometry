@@ -18,6 +18,7 @@
 #include "visual_odometry/msg/vo_state.hpp"
 #include <chrono>
 #include <future>  // std::async를 위해 추가
+#include "visual_odometry/feature_matcher.hpp"  // 추가
 
 namespace vo {
 
@@ -40,7 +41,8 @@ private:
 
     // 멤버 변수들
     ImageProcessor image_processor_;
-    FeatureDetector feature_detector_;
+    std::unique_ptr<FeatureDetector> feature_detector_;
+    std::unique_ptr<FeatureMatcher> feature_matcher_;  // 추가
     CameraParams camera_params_;
     
     // Subscribers
@@ -60,9 +62,9 @@ private:
     bool camera_info_received_{false};
     bool features_detected_{false};
     cv::Mat current_frame_;
-    cv::Mat previous_frame_;
+    cv::Mat prev_frame_;
     cv::Mat current_depth_;
-    cv::Mat previous_depth_;
+    cv::Mat prev_depth_;
 
     // 시각화 관련 변수들
     bool show_original_{false};
@@ -133,7 +135,7 @@ private:
 
     // 매칭 관련 멤버 추가
     Features prev_features_;
-    cv::Mat prev_frame_;
+    cv::Mat prev_frame_gray_;
     bool first_frame_{true};
 
     // 이미지 처리를 위한 버퍼

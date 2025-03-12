@@ -1,5 +1,7 @@
 #include "visual_odometry/feature_detector.hpp"
 #include <opencv2/imgproc.hpp>
+#include <opencv2/calib3d.hpp>
+#include <opencv2/video.hpp>    // calcOpticalFlowPyrLK를 위해 추가
 #include <rclcpp/rclcpp.hpp>
 
 namespace vo {
@@ -16,22 +18,10 @@ FeatureDetector::FeatureDetector() {
         descriptor_ = cv::ORB::create(
             max_features_,    // nfeatures
             scale_factor_,    // scaleFactor
-            n_levels_,        // nlevels
-            31,              // edgeThreshold
-            0,               // firstLevel
-            2,               // WTA_K
-            cv::ORB::HARRIS_SCORE,  // scoreType
-            31,              // patchSize
-            20               // fastThreshold
+            n_levels_         // nlevels
         );
         if (!descriptor_) {
             throw std::runtime_error("Failed to create ORB detector");
-        }
-
-        // BFMatcher 생성
-        matcher_ = cv::BFMatcher::create(cv::NORM_HAMMING, true);
-        if (!matcher_) {
-            throw std::runtime_error("Failed to create BFMatcher");
         }
 
         RCLCPP_INFO(rclcpp::get_logger("feature_detector"), 
@@ -51,20 +41,25 @@ Features FeatureDetector::detectFeatures(const cv::Mat& frame,
     
     try {
         // 이미지 전처리 최적화
-        cv::Mat gray;
         if (frame.channels() == 3) {
-            cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
+            // 현재 프레임을 그레이스케일로 변환하고 저장
+            cv::cvtColor(frame, curr_frame_gray_, cv::COLOR_BGR2GRAY);
         } else {
-            gray = frame;
+            curr_frame_gray_ = frame.clone();
+        }
+
+        // 첫 프레임이면 이전 프레임으로도 저장
+        if (first_frame_) {
+            prev_frame_gray_ = curr_frame_gray_.clone();
+            first_frame_ = false;
         }
 
         // FAST 검출기 파라미터 최적화
         std::vector<cv::KeyPoint> keypoints;
-        cv::FAST(gray, keypoints, fast_threshold, true);  // true: non-max suppression 활성화
+        cv::FAST(curr_frame_gray_, keypoints, fast_threshold, true);
 
         // 최적의 특징점 선택
         if (keypoints.size() > static_cast<size_t>(max_features)) {
-            // 품질 기반 정렬
             std::sort(keypoints.begin(), keypoints.end(),
                      [](const cv::KeyPoint& a, const cv::KeyPoint& b) {
                          return a.response > b.response;
@@ -75,42 +70,20 @@ Features FeatureDetector::detectFeatures(const cv::Mat& frame,
         // 특징점 계산
         cv::Mat descriptors;
         if (!keypoints.empty()) {
-            descriptor_->compute(gray, keypoints, descriptors);
+            descriptor_->compute(curr_frame_gray_, keypoints, descriptors);
         }
 
         result.keypoints = std::move(keypoints);
         result.descriptors = std::move(descriptors);
+
+        // 다음 프레임을 위해 현재 프레임을 이전 프레임으로 저장
+        prev_frame_gray_ = curr_frame_gray_.clone();
         
     } catch (const std::exception& e) {
         RCLCPP_ERROR(rclcpp::get_logger("feature_detector"), 
                     "Error in detectFeatures: %s", e.what());
     }
 
-    return result;
-}
-
-FeatureMatches FeatureDetector::matchFeatures(const Features& prev_features,
-                                            const Features& curr_features) {
-    FeatureMatches result;
-    
-    if (prev_features.keypoints.empty() || curr_features.keypoints.empty()) {
-        return result;
-    }
-    
-    // 매칭 수행
-    std::vector<cv::DMatch> matches;
-    matcher_->match(prev_features.descriptors, curr_features.descriptors, matches);
-    
-    // 매칭점 좌표 저장
-    result.matches = matches;
-    result.prev_points.reserve(matches.size());
-    result.curr_points.reserve(matches.size());
-    
-    for (const auto& match : matches) {
-        result.prev_points.push_back(prev_features.keypoints[match.queryIdx].pt);
-        result.curr_points.push_back(curr_features.keypoints[match.trainIdx].pt);
-    }
-    
     return result;
 }
 
@@ -133,22 +106,10 @@ void FeatureDetector::updateDetector() {
         descriptor_ = cv::ORB::create(
             max_features_,    // nfeatures
             scale_factor_,    // scaleFactor
-            n_levels_,        // nlevels
-            31,              // edgeThreshold
-            0,               // firstLevel
-            2,               // WTA_K
-            cv::ORB::HARRIS_SCORE,  // scoreType
-            31,              // patchSize
-            20               // fastThreshold
+            n_levels_         // nlevels
         );
         if (!descriptor_) {
             throw std::runtime_error("Failed to update ORB detector");
-        }
-
-        // BFMatcher 업데이트
-        matcher_ = cv::BFMatcher::create(cv::NORM_HAMMING, true);
-        if (!matcher_) {
-            throw std::runtime_error("Failed to update BFMatcher");
         }
 
         RCLCPP_INFO(rclcpp::get_logger("feature_detector"), 

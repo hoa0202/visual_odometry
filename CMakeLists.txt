@@ -57,6 +57,7 @@ set(SOURCES
   src/vo_node.cpp
   src/image_processor.cpp
   src/feature_detector.cpp
+  src/feature_matcher.cpp
   src/zed_interface.cpp
 )
 
