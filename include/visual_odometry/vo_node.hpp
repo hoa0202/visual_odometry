@@ -17,6 +17,10 @@
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include "visual_odometry/msg/vo_state.hpp"
 #include <chrono>
+#include <future>  // std::async를 위해 추가
+#include "visual_odometry/feature_matcher.hpp"  // 추가
+#include "visual_odometry/visualization.hpp"  // 추가
+#include "visual_odometry/frame_processor.hpp"  // 추가
 
 namespace vo {
 
@@ -39,7 +43,8 @@ private:
 
     // 멤버 변수들
     ImageProcessor image_processor_;
-    FeatureDetector feature_detector_;
+    std::shared_ptr<FeatureDetector> feature_detector_;
+    std::shared_ptr<FeatureMatcher> feature_matcher_;  // 추가
     CameraParams camera_params_;
     
     // Subscribers
@@ -59,21 +64,21 @@ private:
     bool camera_info_received_{false};
     bool features_detected_{false};
     cv::Mat current_frame_;
-    cv::Mat previous_frame_;
+    cv::Mat prev_frame_;
     cv::Mat current_depth_;
-    cv::Mat previous_depth_;
+    cv::Mat prev_depth_;
 
     // 시각화 관련 변수들
-    bool show_original_{true};
-    bool show_features_{true};
-    bool show_matches_{true};  // 매칭 표시 여부
+    bool show_original_{false};
+    bool show_features_{false};
+    bool show_matches_{false};
     int window_width_{800};
     int window_height_{600};
     int window_pos_x_{100};
     int window_pos_y_{100};
     const std::string original_window_name_{"Original Image"};
     const std::string feature_window_name_{"Feature Detection"};
-    const std::string matches_window_name_{"Feature Matches"};  // 추가
+    const std::string matches_window_name_{"Feature Matches"};
 
     std::thread display_thread_;
     std::mutex frame_mutex_;
@@ -132,7 +137,7 @@ private:
 
     // 매칭 관련 멤버 추가
     Features prev_features_;
-    cv::Mat prev_frame_;
+    cv::Mat prev_frame_gray_;
     bool first_frame_{true};
 
     // 이미지 처리를 위한 버퍼
@@ -145,6 +150,20 @@ private:
 
     // 결과 발행 함수 선언
     void publishResults(const Features& features, const FeatureMatches& matches);
+
+    // 특징점 검출 파라미터
+    int max_features_{500};
+    int fast_threshold_{20};
+
+    // 비동기 작업 관리를 위한 변수들
+    std::future<void> viz_future_;
+    std::future<void> pub_future_;
+
+    // 시각화 관련 멤버 추가
+    std::unique_ptr<Visualizer> visualizer_;
+
+    // 컴포넌트들
+    std::unique_ptr<FrameProcessor> frame_processor_;    // 추가
 };
 
 } // namespace vo 

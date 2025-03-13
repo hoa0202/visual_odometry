@@ -3,64 +3,79 @@
 
 namespace vo {
 
-ImageProcessor::ImageProcessor() {}
-
-ProcessedImages ImageProcessor::process(const cv::Mat& input_frame) {
-    cv::Mat gray_buffer;
-    return process(input_frame, gray_buffer);
-}
-
-ProcessedImages ImageProcessor::process(const cv::Mat& input_frame, cv::Mat& gray_buffer) {
+ProcessedImages ImageProcessor::processImage(const cv::Mat& input, bool enhance) {
     ProcessedImages result;
     
-    // 그레이스케일 변환 (버퍼 재사용)
-    if (gray_buffer.empty() || gray_buffer.size() != input_frame.size()) {
-        gray_buffer.create(input_frame.size(), CV_8UC1);
-    }
-    cv::cvtColor(input_frame, gray_buffer, cv::COLOR_BGR2GRAY);
-    result.gray = gray_buffer;
+    // 그레이스케일 변환
+    convertToGray(input);
+    result.gray = gray_buffer_;
 
-    // 히스토그램 평활화 (필요한 경우)
-    if (enable_histogram_eq_) {
-        cv::equalizeHist(result.gray, result.gray);
-    }
+    if (enhance) {
+        // 이미지 향상
+        enhanceImage();
+        result.enhanced = enhanced_buffer_;
 
-    // 가우시안 블러 (필요한 경우)
-    if (gaussian_blur_size_ > 0) {
-        cv::GaussianBlur(result.gray, result.gray, 
-                        cv::Size(gaussian_blur_size_, gaussian_blur_size_),
-                        gaussian_sigma_);
+        // 노이즈 제거
+        denoiseImage();
+        result.denoised = denoised_buffer_;
+
+        // 마스크 생성
+        createMask();
+        result.masked = masked_buffer_;
     }
 
     return result;
 }
 
-cv::Mat ImageProcessor::convertToGray(const cv::Mat& input) {
-    cv::Mat gray;
-    cv::cvtColor(input, gray, cv::COLOR_BGR2GRAY);
-    return gray;
+void ImageProcessor::convertToGray(const cv::Mat& input) {
+    if (input.channels() == 3) {
+        if (gray_buffer_.empty() || gray_buffer_.size() != input.size()) {
+            gray_buffer_.create(input.size(), CV_8UC1);
+        }
+        cv::cvtColor(input, gray_buffer_, cv::COLOR_BGR2GRAY);
+    } else {
+        input.copyTo(gray_buffer_);
+    }
 }
 
-cv::Mat ImageProcessor::enhanceImage(const cv::Mat& gray) {
-    cv::Mat enhanced;
-    cv::equalizeHist(gray, enhanced);
-    return enhanced;
+void ImageProcessor::enhanceImage() {
+    if (enable_histogram_eq_) {
+        if (enhanced_buffer_.empty() || enhanced_buffer_.size() != gray_buffer_.size()) {
+            enhanced_buffer_.create(gray_buffer_.size(), CV_8UC1);
+        }
+        cv::equalizeHist(gray_buffer_, enhanced_buffer_);
+    } else {
+        gray_buffer_.copyTo(enhanced_buffer_);
+    }
 }
 
-cv::Mat ImageProcessor::denoiseImage(const cv::Mat& enhanced) {
-    cv::Mat denoised;
-    cv::GaussianBlur(enhanced, denoised, cv::Size(5, 5), 1.0);
-    return denoised;
+void ImageProcessor::denoiseImage() {
+    if (gaussian_blur_size_ > 1) {
+        if (denoised_buffer_.empty() || denoised_buffer_.size() != enhanced_buffer_.size()) {
+            denoised_buffer_.create(enhanced_buffer_.size(), CV_8UC1);
+        }
+        cv::GaussianBlur(enhanced_buffer_, denoised_buffer_,
+                        cv::Size(gaussian_blur_size_, gaussian_blur_size_),
+                        gaussian_sigma_);
+    } else {
+        enhanced_buffer_.copyTo(denoised_buffer_);
+    }
 }
 
-cv::Mat ImageProcessor::createMask(const cv::Size& size) {
-    cv::Mat mask = cv::Mat::zeros(size, CV_8UC1);
-    cv::rectangle(mask, 
-                 cv::Point(0, size.height/4), 
-                 cv::Point(size.width, size.height*3/4), 
-                 cv::Scalar(255), 
+void ImageProcessor::createMask() {
+    if (masked_buffer_.empty() || masked_buffer_.size() != denoised_buffer_.size()) {
+        masked_buffer_.create(denoised_buffer_.size(), CV_8UC1);
+    }
+    // ROI 마스크 생성
+    masked_buffer_ = cv::Mat::zeros(denoised_buffer_.size(), CV_8UC1);
+    cv::rectangle(masked_buffer_,
+                 cv::Point(0, denoised_buffer_.rows/4),
+                 cv::Point(denoised_buffer_.cols, denoised_buffer_.rows*3/4),
+                 cv::Scalar(255),
                  -1);
-    return mask;
+    
+    // 마스크 적용
+    cv::bitwise_and(denoised_buffer_, masked_buffer_, masked_buffer_);
 }
 
 } // namespace vo 
