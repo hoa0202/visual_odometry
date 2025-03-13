@@ -23,7 +23,6 @@ FeatureMatches FeatureMatcher::match(
         // 1. 입력 검증
         if (prev_features.keypoints.empty() || curr_features.keypoints.empty() ||
             prev_frame_gray.empty() || curr_frame_gray.empty()) {
-            RCLCPP_WARN(rclcpp::get_logger("feature_matcher"), "Empty input data");
             return result;
         }
 
@@ -48,8 +47,6 @@ FeatureMatches FeatureMatcher::match(
 
         // 4. 매칭이 충분한지 확인
         if (good_matches.size() < 8) {
-            RCLCPP_WARN(rclcpp::get_logger("feature_matcher"), 
-                       "Not enough matches: %zu", good_matches.size());
             return result;
         }
 
@@ -71,11 +68,6 @@ FeatureMatches FeatureMatcher::match(
                 result.curr_points.push_back(curr_pts[i]);
             }
         }
-
-        // 7. 매칭 결과 로깅
-        RCLCPP_INFO(rclcpp::get_logger("feature_matcher"),
-                   "Matches: initial=%zu, after ratio test=%zu, after RANSAC=%zu",
-                   knn_matches.size(), good_matches.size(), result.matches.size());
 
     } catch (const std::exception& e) {
         RCLCPP_ERROR(rclcpp::get_logger("feature_matcher"),
