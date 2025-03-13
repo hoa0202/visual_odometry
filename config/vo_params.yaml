@@ -2,7 +2,7 @@
   ros__parameters:
     # Input Source Settings
     input:
-      source: "zed_sdk"  # "ros2" 또는 "zed_sdk"
+      source: "ros2"  # "ros2" 또는 "zed_sdk"
       zed:
         serial_number: 42384922
         resolution: "HD1080"  # HD2K, HD1080, HD720

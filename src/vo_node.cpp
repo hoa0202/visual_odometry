@@ -71,14 +71,16 @@ VisualOdometryNode::VisualOdometryNode()
         prev_features_ = Features();
         first_frame_ = true;
 
+        // Visualizer 초기화 (시각화 설정과 관계없이 항상 생성)
+        visualizer_ = std::make_unique<Visualizer>();
+        visualizer_->setWindowSize(window_width_, window_height_);
+        visualizer_->setShowOriginal(show_original_);
+        visualizer_->setShowFeatures(show_features_);
+        visualizer_->setShowMatches(show_matches_);
+        
         // 시각화가 활성화된 경우에만 윈도우 생성
         bool visualization_enabled = show_original_ || show_features_ || show_matches_;
         if (visualization_enabled) {
-            visualizer_ = std::make_unique<Visualizer>();
-            visualizer_->setWindowSize(window_width_, window_height_);
-            visualizer_->setShowOriginal(show_original_);
-            visualizer_->setShowFeatures(show_features_);
-            visualizer_->setShowMatches(show_matches_);
             visualizer_->createWindows();
         }
 
@@ -414,37 +416,47 @@ void VisualOdometryNode::processImages(const cv::Mat& rgb, const cv::Mat& depth)
         // 프레임 처리
         auto result = frame_processor_->processFrame(rgb, depth, first_frame_);
         
-        // 성능 로깅
-        static rclcpp::Time last_log_time = this->now();
-        static int frame_count = 0;
-        frame_count++;
+        // 시각화 (visualizer가 있을 때만)
+        if (visualizer_) {
+            auto viz_start = std::chrono::steady_clock::now();
+            updateVisualization(rgb, result.features, result.matches);
+            double visualization_time = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - viz_start).count();
+                
+            // 성능 로깅
+            static rclcpp::Time last_log_time = this->now();
+            static int frame_count = 0;
+            frame_count++;
 
-        auto current_time = this->now();
-        if ((current_time - last_log_time).seconds() >= 1.0) {
-            // 매칭 품질 계산
-            float matching_ratio = result.features.keypoints.empty() ? 0.0f :
-                static_cast<float>(result.matches.matches.size()) / 
-                static_cast<float>(result.features.keypoints.size());
-            
-            RCLCPP_INFO(this->get_logger(), 
-                "\n[Processing Performance]"
-                "\n- Feature Detection: %.1f ms (%.1f FPS)"
-                "\n- Feature Matching:  %.1f ms"
-                "\n[Detection Results]"
-                "\n- Features: %zu"
-                "\n- Matches:  %zu"
-                "\n- Matching Ratio: %.2f"
-                "\n- Average Movement: %.1f px",
-                result.feature_detection_time, 
-                frame_count / (current_time - last_log_time).seconds(),
-                result.feature_matching_time,
-                result.features.keypoints.size(),
-                result.matches.matches.size(),
-                matching_ratio,
-                calculateAverageMovement(result.matches));
+            auto current_time = this->now();
+            if ((current_time - last_log_time).seconds() >= 1.0) {
+                // 매칭 품질 계산
+                float matching_ratio = result.features.keypoints.empty() ? 0.0f :
+                    static_cast<float>(result.matches.matches.size()) / 
+                    static_cast<float>(result.features.keypoints.size());
+                
+                RCLCPP_INFO(this->get_logger(), 
+                    "\n[Processing Performance]"
+                    "\n- Feature Detection: %.1f ms (%.1f FPS)"
+                    "\n- Feature Matching:  %.1f ms"
+                    "\n- Visualization:     %.1f ms"
+                    "\n[Detection Results]"
+                    "\n- Features: %zu"
+                    "\n- Matches:  %zu"
+                    "\n- Matching Ratio: %.2f"
+                    "\n- Average Movement: %.1f px",
+                    result.feature_detection_time, 
+                    frame_count / (current_time - last_log_time).seconds(),
+                    result.feature_matching_time,
+                    visualization_time,
+                    result.features.keypoints.size(),
+                    result.matches.matches.size(),
+                    matching_ratio,
+                    calculateAverageMovement(result.matches));
 
-            frame_count = 0;
-            last_log_time = current_time;
+                frame_count = 0;
+                last_log_time = current_time;
+            }
         }
 
         // 현재 프레임을 이전 프레임으로 저장
@@ -479,7 +491,12 @@ void VisualOdometryNode::updateVisualization(const cv::Mat& rgb,
                                            const Features& features,
                                            const FeatureMatches& matches) {
     if (visualizer_) {
-        visualizer_->visualize(rgb, features, matches, prev_frame_);
+        try {
+            visualizer_->visualize(rgb, features, matches, prev_frame_);
+            cv::waitKey(1);  // 이 부분 추가
+        } catch (const std::exception& e) {
+            RCLCPP_ERROR(this->get_logger(), "Error in visualization: %s", e.what());
+        }
     }
 }
 
