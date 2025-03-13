@@ -15,7 +15,7 @@ VisualOdometryNode::VisualOdometryNode()
       zed_acquisition_time_(0.0) {
     try {
         // 1. 파라미터 선언
-    declareParameters();
+        declareParameters();
     
         // 2. 시각화 관련 파라미터만 먼저 적용
         window_width_ = this->get_parameter("visualization.window_width").as_int();
@@ -33,7 +33,7 @@ VisualOdometryNode::VisualOdometryNode()
         }
 
         // 4. 나머지 파라미터 적용
-    applyCurrentParameters();
+        applyCurrentParameters();
     
         // QoS 프로파일 설정
         auto qos = rclcpp::QoS(1).best_effort().durability_volatile();
@@ -71,19 +71,22 @@ VisualOdometryNode::VisualOdometryNode()
         prev_features_ = Features();
         first_frame_ = true;
 
-        // 윈도우 생성
-        if (show_original_ || show_features_ || show_matches_) {
-            if (show_original_) {
-                cv::namedWindow(original_window_name_, cv::WINDOW_AUTOSIZE);
-            }
-            if (show_features_) {
-                cv::namedWindow(feature_window_name_, cv::WINDOW_AUTOSIZE);
-            }
-            if (show_matches_) {
-                cv::namedWindow(matches_window_name_, cv::WINDOW_AUTOSIZE);
-            }
-            display_thread_ = std::thread(&VisualOdometryNode::displayLoop, this);
+        // 시각화가 활성화된 경우에만 윈도우 생성
+        bool visualization_enabled = show_original_ || show_features_ || show_matches_;
+        if (visualization_enabled) {
+            visualizer_ = std::make_unique<Visualizer>();
+            visualizer_->setWindowSize(window_width_, window_height_);
+            visualizer_->setShowOriginal(show_original_);
+            visualizer_->setShowFeatures(show_features_);
+            visualizer_->setShowMatches(show_matches_);
+            visualizer_->createWindows();
         }
+
+        // 프레임 처리 객체 초기화
+        frame_processor_ = std::make_unique<FrameProcessor>(
+            feature_detector_,
+            feature_matcher_
+        );
 
         // ZED SDK 모드를 위한 타이머 추가
         if (input_source_ == "zed_sdk") {
@@ -95,21 +98,7 @@ VisualOdometryNode::VisualOdometryNode()
         // 이미지 처리 스레드 시작
         processing_thread_ = std::thread(&VisualOdometryNode::processingLoop, this);
 
-        // 시각화 초기화
-        visualizer_ = std::make_unique<Visualizer>();
-        visualizer_->setWindowSize(window_width_, window_height_);
-        visualizer_->setShowOriginal(show_original_);
-        visualizer_->setShowFeatures(show_features_);
-        visualizer_->setShowMatches(show_matches_);
-        visualizer_->createWindows();
-
-        // 프레임 처리 객체 초기화
-        frame_processor_ = std::make_unique<FrameProcessor>(
-            feature_detector_,
-            feature_matcher_
-        );
-
-    RCLCPP_INFO(this->get_logger(), "Visual Odometry Node has been initialized");
+        RCLCPP_INFO(this->get_logger(), "Visual Odometry Node has been initialized");
     }
     catch (const std::exception& e) {
         RCLCPP_ERROR(this->get_logger(), "Error in constructor: %s", e.what());
@@ -119,12 +108,13 @@ VisualOdometryNode::VisualOdometryNode()
 
 VisualOdometryNode::~VisualOdometryNode() {
     should_exit_ = true;
-    if (display_thread_.joinable()) {
-        display_thread_.join();
+    
+    // display_thread_ 관련 코드 제거
+    if (processing_thread_.joinable()) {
+        processing_thread_.join();
     }
-    if (show_original_) cv::destroyWindow(original_window_name_);
-    if (show_features_) cv::destroyWindow(feature_window_name_);
-    if (show_matches_) cv::destroyWindow(matches_window_name_);
+    
+    // 시각화 관련 정리
     if (visualizer_) {
         visualizer_->destroyWindows();
     }
@@ -424,49 +414,41 @@ void VisualOdometryNode::processImages(const cv::Mat& rgb, const cv::Mat& depth)
         // 프레임 처리
         auto result = frame_processor_->processFrame(rgb, depth, first_frame_);
         
-        // 시각화 (prev_frame_ 업데이트 전에 시각화)
-        if (show_original_ || show_features_ || show_matches_) {
-            auto viz_start = std::chrono::steady_clock::now();
-            
-            // prev_frame이 비어있지 않은지 확인하고 시각화
-            if (!prev_frame_.empty()) {
-                updateVisualization(rgb, result.features, result.matches);
-            } else {
-                RCLCPP_DEBUG(this->get_logger(), "Skipping visualization - no previous frame");
-            }
-            
-            double visualization_time = std::chrono::duration<double, std::milli>(
-                std::chrono::steady_clock::now() - viz_start).count();
-                
-            // 성능 로깅
-            static rclcpp::Time last_log_time = this->now();
-            static int frame_count = 0;
-            frame_count++;
+        // 성능 로깅
+        static rclcpp::Time last_log_time = this->now();
+        static int frame_count = 0;
+        frame_count++;
 
-            auto current_time = this->now();
-            if ((current_time - last_log_time).seconds() >= 1.0) {
-                RCLCPP_INFO(this->get_logger(), 
-                    "\n[Processing Performance]"
-                    "\n- Feature Detection: %.1f ms (%.1f FPS)"
-                    "\n- Feature Matching:  %.1f ms"
-                    "\n- Visualization:     %.1f ms"
-                    "\n[Detection Results]"
-                    "\n- Features: %zu"
-                    "\n- Matches:  %zu",
-                    result.feature_detection_time, 
-                    frame_count / (current_time - last_log_time).seconds(),
-                    result.feature_matching_time,
-                    visualization_time,
-                    result.features.keypoints.size(),
-                    result.matches.matches.size());
+        auto current_time = this->now();
+        if ((current_time - last_log_time).seconds() >= 1.0) {
+            // 매칭 품질 계산
+            float matching_ratio = result.features.keypoints.empty() ? 0.0f :
+                static_cast<float>(result.matches.matches.size()) / 
+                static_cast<float>(result.features.keypoints.size());
+            
+            RCLCPP_INFO(this->get_logger(), 
+                "\n[Processing Performance]"
+                "\n- Feature Detection: %.1f ms (%.1f FPS)"
+                "\n- Feature Matching:  %.1f ms"
+                "\n[Detection Results]"
+                "\n- Features: %zu"
+                "\n- Matches:  %zu"
+                "\n- Matching Ratio: %.2f"
+                "\n- Average Movement: %.1f px",
+                result.feature_detection_time, 
+                frame_count / (current_time - last_log_time).seconds(),
+                result.feature_matching_time,
+                result.features.keypoints.size(),
+                result.matches.matches.size(),
+                matching_ratio,
+                calculateAverageMovement(result.matches));
 
-                frame_count = 0;
-                last_log_time = current_time;
-            }
+            frame_count = 0;
+            last_log_time = current_time;
         }
 
         // 현재 프레임을 이전 프레임으로 저장
-        prev_frame_ = rgb.clone();  // 깊은 복사 사용
+        prev_frame_ = rgb.clone();
         first_frame_ = false;
 
         // 결과 발행
@@ -477,47 +459,20 @@ void VisualOdometryNode::processImages(const cv::Mat& rgb, const cv::Mat& depth)
     }
 }
 
-void VisualOdometryNode::displayLoop() {
-    static bool was_showing_matches = false;  // 이전 상태 저장
-
-    while (rclcpp::ok() && !should_exit_) {
-        if (show_original_ || show_features_ || show_matches_) {
-            std::lock_guard<std::mutex> lock(frame_mutex_);
-            
-            // 한 번에 모든 윈도우 업데이트
-            if (show_original_ && !display_frame_original_.empty()) {
-                cv::imshow(original_window_name_, display_frame_original_);
-            }
-            if (show_features_ && !display_frame_features_.empty()) {
-                cv::imshow(feature_window_name_, display_frame_features_);
-            }
-            if (show_matches_ && !display_frame_matches_.empty()) {
-                cv::imshow(matches_window_name_, display_frame_matches_);
-                was_showing_matches = true;
-            } else if (was_showing_matches) {
-                // 매칭 윈도우가 표시되었다가 비활성화된 경우 윈도우 닫기
-                cv::destroyWindow(matches_window_name_);
-                was_showing_matches = false;
-            }
-            
-            cv::waitKey(1);
-        }
-        
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+// 평균 이동 거리 계산 함수 추가
+float VisualOdometryNode::calculateAverageMovement(const FeatureMatches& matches) {
+    if (matches.prev_points.empty() || matches.curr_points.empty()) {
+        return 0.0f;
     }
-}
 
-void VisualOdometryNode::processingLoop() {
-    while (rclcpp::ok() && !should_exit_) {
-        std::unique_lock<std::mutex> lock(image_queue_mutex_);
-        image_ready_.wait(lock, [this]() { return !image_queue_.empty(); });
-
-        auto [rgb, depth] = image_queue_.front();
-        image_queue_.pop();
-        lock.unlock();
-
-        processImages(rgb, depth);
+    float total_movement = 0.0f;
+    for (size_t i = 0; i < matches.prev_points.size(); i++) {
+        float dx = matches.curr_points[i].x - matches.prev_points[i].x;
+        float dy = matches.curr_points[i].y - matches.prev_points[i].y;
+        total_movement += std::sqrt(dx*dx + dy*dy);
     }
+
+    return total_movement / matches.prev_points.size();
 }
 
 void VisualOdometryNode::updateVisualization(const cv::Mat& rgb,
@@ -570,6 +525,19 @@ void VisualOdometryNode::publishResults(const Features& features,
         }
     } catch (const std::exception& e) {
         RCLCPP_ERROR(this->get_logger(), "Error in publishResults: %s", e.what());
+    }
+}
+
+void VisualOdometryNode::processingLoop() {
+    while (rclcpp::ok() && !should_exit_) {
+        std::unique_lock<std::mutex> lock(image_queue_mutex_);
+        image_ready_.wait(lock, [this]() { return !image_queue_.empty(); });
+
+        auto [rgb, depth] = image_queue_.front();
+        image_queue_.pop();
+        lock.unlock();
+
+        processImages(rgb, depth);
     }
 }
 
