@@ -59,6 +59,8 @@ set(SOURCES
   src/feature_detector.cpp
   src/feature_matcher.cpp
   src/zed_interface.cpp
+  src/visualization.cpp
+  src/frame_processor.cpp
 )
 
 # 실행 파일 추가

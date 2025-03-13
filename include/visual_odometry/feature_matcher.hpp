@@ -17,6 +17,7 @@ public:
 
 private:
     cv::Ptr<cv::BFMatcher> matcher_;
+    float ratio_threshold_;  // Lowe's ratio test threshold
 };
 
 } // namespace vo 

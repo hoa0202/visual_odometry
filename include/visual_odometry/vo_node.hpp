@@ -19,6 +19,8 @@
 #include <chrono>
 #include <future>  // std::async를 위해 추가
 #include "visual_odometry/feature_matcher.hpp"  // 추가
+#include "visual_odometry/visualization.hpp"  // 추가
+#include "visual_odometry/frame_processor.hpp"  // 추가
 
 namespace vo {
 
@@ -41,8 +43,8 @@ private:
 
     // 멤버 변수들
     ImageProcessor image_processor_;
-    std::unique_ptr<FeatureDetector> feature_detector_;
-    std::unique_ptr<FeatureMatcher> feature_matcher_;  // 추가
+    std::shared_ptr<FeatureDetector> feature_detector_;
+    std::shared_ptr<FeatureMatcher> feature_matcher_;  // 추가
     CameraParams camera_params_;
     
     // Subscribers
@@ -156,6 +158,12 @@ private:
     // 비동기 작업 관리를 위한 변수들
     std::future<void> viz_future_;
     std::future<void> pub_future_;
+
+    // 시각화 관련 멤버 추가
+    std::unique_ptr<Visualizer> visualizer_;
+
+    // 컴포넌트들
+    std::unique_ptr<FrameProcessor> frame_processor_;    // 추가
 };
 
 } // namespace vo 
