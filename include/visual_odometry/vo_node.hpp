@@ -80,11 +80,6 @@ private:
     const std::string feature_window_name_{"Feature Detection"};
     const std::string matches_window_name_{"Feature Matches"};
 
-    std::thread display_thread_;
-    std::mutex frame_mutex_;
-    cv::Mat display_frame_;
-    bool should_exit_{false};
-    
     // FPS 계산을 위한 변수들
     rclcpp::Time last_fps_time_{0};
     int fps_frame_count_{0};
@@ -133,6 +128,7 @@ private:
     std::mutex image_queue_mutex_;
     std::condition_variable image_ready_;
     std::thread processing_thread_;
+    bool should_exit_{false};  // 다시 추가
     void processingLoop();
 
     // 매칭 관련 멤버 추가
@@ -164,6 +160,9 @@ private:
 
     // 컴포넌트들
     std::unique_ptr<FrameProcessor> frame_processor_;    // 추가
+
+    // 평균 이동 거리 계산 함수
+    float calculateAverageMovement(const FeatureMatches& matches);
 };
 
 } // namespace vo 
