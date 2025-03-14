@@ -5,6 +5,7 @@
 #include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/msg/camera_info.hpp>
 #include <opencv2/highgui.hpp>
+#include <opencv2/core/cuda.hpp>  // CUDA 지원 확인용
 #include "visual_odometry/image_processor.hpp"
 #include "visual_odometry/feature_detector.hpp"
 #include "visual_odometry/types.hpp"
@@ -21,8 +22,15 @@
 #include "visual_odometry/feature_matcher.hpp"  // 추가
 #include "visual_odometry/visualization.hpp"  // 추가
 #include "visual_odometry/frame_processor.hpp"  // 추가
+#include "visual_odometry/resource_monitor.hpp"
+#include "visual_odometry/logger.hpp"  // Logger 헤더 추가 확인
 
 namespace vo {
+
+// 큐 관련 상수 정의
+constexpr size_t MIN_QUEUE_SIZE = 5;
+constexpr size_t MAX_QUEUE_SIZE = 20;
+constexpr double PROCESS_TIME_THRESHOLD = 50.0;  // ms
 
 class VisualOdometryNode : public rclcpp::Node {
 public:
@@ -163,6 +171,13 @@ private:
 
     // 평균 이동 거리 계산 함수
     float calculateAverageMovement(const FeatureMatches& matches);
+
+    // 리소스 모니터링
+    std::unique_ptr<ResourceMonitor> resource_monitor_;
+    void clearOldData();  // 메모리 관리용
+
+    // Logger 멤버 변수 추가
+    std::unique_ptr<Logger> logger_;
 };
 
 } // namespace vo 
