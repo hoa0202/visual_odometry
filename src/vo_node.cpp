@@ -4,6 +4,8 @@
 #include "visual_odometry/msg/vo_state.hpp"
 #include "visual_odometry/visualization.hpp"
 #include "visual_odometry/frame_processor.hpp"
+#include "visual_odometry/logger.hpp"
+#include "visual_odometry/resource_monitor.hpp"
 
 namespace vo {
 
@@ -24,6 +26,38 @@ VisualOdometryNode::VisualOdometryNode()
         show_features_ = this->get_parameter("visualization.windows.show_features").as_bool();
         show_matches_ = this->get_parameter("visualization.windows.show_matches").as_bool();
         
+        // 로깅 객체 초기화 (다른 초기화보다 먼저)
+        logger_ = std::make_unique<Logger>(this);
+        resource_monitor_ = std::make_unique<ResourceMonitor>(this);
+        
+        // 초기 시스템 정보 로깅
+        SystemInfo system_info;
+        system_info.window_width = window_width_;
+        system_info.window_height = window_height_;
+        system_info.window_pos_x = window_pos_x_;
+        system_info.window_pos_y = window_pos_y_;
+        system_info.show_original = show_original_;
+        system_info.show_features = show_features_;
+        system_info.show_matches = show_matches_;
+        
+        // Feature Detector 설정
+        system_info.max_features = this->get_parameter("feature_detector.max_features").as_int();
+        system_info.scale_factor = this->get_parameter("feature_detector.scale_factor").as_double();
+        system_info.n_levels = this->get_parameter("feature_detector.n_levels").as_int();
+        
+        // 입력 소스 설정
+        system_info.input_source = input_source_;
+        system_info.rgb_topic = this->get_parameter("topics.rgb_image").as_string();
+        system_info.depth_topic = this->get_parameter("topics.depth_image").as_string();
+        system_info.camera_info_topic = this->get_parameter("topics.camera_info").as_string();
+        
+        // 처리 설정
+        system_info.queue_size = 5;  // 기본 큐 크기
+        system_info.target_fps = 60.0;  // 목표 FPS
+        
+        // 시스템 정보 로깅
+        logger_->logSystemInfo(system_info);
+
         // 3. Feature detector와 matcher를 shared_ptr로 초기화
         feature_detector_ = std::make_shared<FeatureDetector>();
         feature_matcher_ = std::make_shared<FeatureMatcher>();
@@ -188,7 +222,15 @@ void VisualOdometryNode::declareParameters()
 
 void VisualOdometryNode::applyCurrentParameters() {
     try {
-        // 시각화 파라미터 먼저 적용
+        std::vector<rclcpp::Parameter> current_params = this->get_parameters(
+            {"visualization.window_width", "visualization.window_height",
+             "visualization.windows.show_original", "visualization.windows.show_features",
+             "visualization.windows.show_matches", "visualization.window_pos_x",
+             "visualization.window_pos_y", "feature_detector.max_features",
+             "feature_detector.scale_factor", "feature_detector.n_levels",
+             "feature_detector.visualization_type"});
+
+        // 시각화 파라미터 적용
         window_width_ = this->get_parameter("visualization.window_width").as_int();
         window_height_ = this->get_parameter("visualization.window_height").as_int();
         show_original_ = this->get_parameter("visualization.windows.show_original").as_bool();
@@ -197,45 +239,34 @@ void VisualOdometryNode::applyCurrentParameters() {
         window_pos_x_ = this->get_parameter("visualization.window_pos_x").as_int();
         window_pos_y_ = this->get_parameter("visualization.window_pos_y").as_int();
 
-        // 시각화 파라미터 로깅
-        RCLCPP_INFO(this->get_logger(), 
-                    "Visualization Parameters:"
-                    "\n  - window_size: %dx%d"
-                    "\n  - window_position: (%d, %d)"
-                    "\n  - show_original: %s"
-                    "\n  - show_features: %s"
-                    "\n  - show_matches: %s",
-                    window_width_, window_height_,
-                    window_pos_x_, window_pos_y_,
-                    show_original_ ? "true" : "false",
-                    show_features_ ? "true" : "false",
-                    show_matches_ ? "true" : "false");
+        // Logger를 통한 시각화 파라미터 로깅
+        logger_->logVisualizationParameters(
+            window_width_, window_height_,
+            window_pos_x_, window_pos_y_,
+            show_original_, show_features_,
+            show_matches_
+        );
 
-        // Feature Detector 파라미터는 feature_detector_가 초기화된 후에만 적용
         if (feature_detector_) {
-    int max_features = this->get_parameter("feature_detector.max_features").as_int();
-    double scale_factor = this->get_parameter("feature_detector.scale_factor").as_double();
-    int n_levels = this->get_parameter("feature_detector.n_levels").as_int();
-    
-            // Feature Detector 파라미터 로깅
-            RCLCPP_INFO(this->get_logger(), 
-                        "Feature Detector Parameters:"
-                        "\n  - max_features: %d"
-                        "\n  - scale_factor: %.2f"
-                        "\n  - n_levels: %d",
-                max_features, scale_factor, n_levels);
-    
+            int max_features = this->get_parameter("feature_detector.max_features").as_int();
+            double scale_factor = this->get_parameter("feature_detector.scale_factor").as_double();
+            int n_levels = this->get_parameter("feature_detector.n_levels").as_int();
+            std::string viz_type = this->get_parameter("feature_detector.visualization_type").as_string();
+
+            // Logger를 통한 Feature Detector 파라미터 로깅
+            logger_->logFeatureDetectorParameters(
+                max_features, scale_factor, n_levels, viz_type
+            );
+
             feature_detector_->setMaxFeatures(max_features);
             feature_detector_->setScaleFactor(scale_factor);
             feature_detector_->setNLevels(n_levels);
-
-            // 시각화 타입 설정
-            std::string viz_type = this->get_parameter("feature_detector.visualization_type").as_string();
             feature_detector_->setVisualizationType(viz_type);
-            
-            RCLCPP_INFO(this->get_logger(), 
-                        "Visualization Type: %s", 
-                        viz_type.c_str());
+        }
+
+        // 파라미터 변경 로깅도 Logger를 통해 처리
+        for (const auto& param : current_params) {
+            logger_->logParameterUpdate(param.get_name(), param);
         }
 
         // 입력 소스 설정
@@ -267,7 +298,7 @@ void VisualOdometryNode::applyCurrentParameters() {
         feature_frame_times_.clear();  // 기존 데이터 초기화
     }
     catch (const std::exception& e) {
-        RCLCPP_ERROR(this->get_logger(), "Error in applyCurrentParameters: %s", e.what());
+        logger_->logError("ParameterUpdate", std::string("Error in applyCurrentParameters: ") + e.what());
     }
 }
 
@@ -346,12 +377,19 @@ void VisualOdometryNode::cameraInfoCallback(const sensor_msgs::msg::CameraInfo::
 }
 
 void VisualOdometryNode::rgbCallback(const sensor_msgs::msg::Image::SharedPtr msg) {
-    if (input_source_ != "ros2") return;
-
     try {
+        // 큐 크기 업데이트
+        {
+            std::lock_guard<std::mutex> lock(image_queue_mutex_);
+            resource_monitor_->updateQueueSize(image_queue_.size());
+        }
+        
         cv_bridge::CvImageConstPtr cv_ptr = cv_bridge::toCvShare(msg);
         cv::Mat rgb = cv_ptr->image;
         cv::Mat depth;  // depth는 depth 콜백에서 처리
+        
+        // 메모리 사용량 업데이트
+        resource_monitor_->checkResources();
         
         // 공통 이미지 처리 함수 호출
         processImages(rgb, depth);
@@ -408,140 +446,51 @@ void VisualOdometryNode::zedTimerCallback() {
 
 void VisualOdometryNode::processImages(const cv::Mat& rgb, const cv::Mat& depth) {
     try {
-        if (rgb.empty()) {
-            RCLCPP_ERROR(this->get_logger(), "Empty RGB image received");
-            return;
-        }
-
-        // 프레임 처리
+        auto start_time = std::chrono::steady_clock::now();
+        
         auto result = frame_processor_->processFrame(rgb, depth, first_frame_);
         
-        // 시각화 (visualizer가 있을 때만)
-        if (visualizer_) {
-            auto viz_start = std::chrono::steady_clock::now();
-            updateVisualization(rgb, result.features, result.matches);
-            double visualization_time = std::chrono::duration<double, std::milli>(
-                std::chrono::steady_clock::now() - viz_start).count();
-                
-            // 성능 로깅
-            static rclcpp::Time last_log_time = this->now();
-            static int frame_count = 0;
-            frame_count++;
-
-            auto current_time = this->now();
-            if ((current_time - last_log_time).seconds() >= 1.0) {
-                // 매칭 품질 계산
-                float matching_ratio = result.features.keypoints.empty() ? 0.0f :
-                    static_cast<float>(result.matches.matches.size()) / 
-                    static_cast<float>(result.features.keypoints.size());
-                
-                RCLCPP_INFO(this->get_logger(), 
-                    "\n[Processing Performance]"
-                    "\n- Feature Detection: %.1f ms (%.1f FPS)"
-                    "\n- Feature Matching:  %.1f ms"
-                    "\n- Visualization:     %.1f ms"
-                    "\n[Detection Results]"
-                    "\n- Features: %zu"
-                    "\n- Matches:  %zu"
-                    "\n- Matching Ratio: %.2f"
-                    "\n- Average Movement: %.1f px",
-                    result.feature_detection_time, 
-                    frame_count / (current_time - last_log_time).seconds(),
-                    result.feature_matching_time,
-                    visualization_time,
-                    result.features.keypoints.size(),
-                    result.matches.matches.size(),
-                    matching_ratio,
-                    calculateAverageMovement(result.matches));
-
-                frame_count = 0;
-                last_log_time = current_time;
-            }
-        }
-
-        // 현재 프레임을 이전 프레임으로 저장
-        prev_frame_ = rgb.clone();
-        first_frame_ = false;
-
-        // 결과 발행
-        publishResults(result.features, result.matches);
-
-    } catch (const std::exception& e) {
-        RCLCPP_ERROR(this->get_logger(), "Error in processImages: %s", e.what());
-    }
-}
-
-// 평균 이동 거리 계산 함수 추가
-float VisualOdometryNode::calculateAverageMovement(const FeatureMatches& matches) {
-    if (matches.prev_points.empty() || matches.curr_points.empty()) {
-        return 0.0f;
-    }
-
-    float total_movement = 0.0f;
-    for (size_t i = 0; i < matches.prev_points.size(); i++) {
-        float dx = matches.curr_points[i].x - matches.prev_points[i].x;
-        float dy = matches.curr_points[i].y - matches.prev_points[i].y;
-        total_movement += std::sqrt(dx*dx + dy*dy);
-    }
-
-    return total_movement / matches.prev_points.size();
-}
-
-void VisualOdometryNode::updateVisualization(const cv::Mat& rgb,
-                                           const Features& features,
-                                           const FeatureMatches& matches) {
-    if (visualizer_) {
-        try {
-            visualizer_->visualize(rgb, features, matches, prev_frame_);
-            cv::waitKey(1);  // 이 부분 추가
-        } catch (const std::exception& e) {
-            RCLCPP_ERROR(this->get_logger(), "Error in visualization: %s", e.what());
-        }
-    }
-}
-
-void VisualOdometryNode::publishResults(const Features& features, 
-                                      const FeatureMatches& matches) {
-    try {
-        auto current_time = this->now();
+        // 리소스 모니터링 업데이트
+        resource_monitor_->updateProcessingTime(result.feature_detection_time);
         
-        // VO 상태 메시지 발행 (더 가벼운 메시지부터 처리)
-        if (vo_state_pub_->get_subscription_count() > 0) {
-            auto msg = visual_odometry::msg::VOState();
-            msg.header.stamp = current_time;
-            msg.header.frame_id = "camera_frame";
-            
-            // 기본 정보 설정
-            msg.num_features = features.keypoints.size();
-            msg.num_matches = matches.matches.size();
-            
-            // 품질 메트릭 계산 (0.0 ~ 1.0)
-            msg.tracking_quality = features.keypoints.empty() ? 0.0f :
-                static_cast<float>(matches.matches.size()) / 
-                static_cast<float>(features.keypoints.size());
-            
-            // 처리 시간 설정
-            msg.processing_time = static_cast<float>(
-                std::chrono::duration<double, std::milli>(
-                    std::chrono::steady_clock::now() - start_time_).count());
-            
-            vo_state_pub_->publish(msg);
+        // 처리 결과 로깅
+        ProcessingMetrics metrics;
+        metrics.detection_time = result.feature_detection_time;
+        metrics.matching_time = result.feature_matching_time;
+        metrics.num_features = result.features.keypoints.size();
+        metrics.num_matches = result.matches.matches.size();
+        metrics.matching_ratio = result.matches.matches.size() / 
+            static_cast<double>(result.features.keypoints.size() + 1e-6);
+        
+        // 시각화 시간 측정
+        auto viz_start = std::chrono::steady_clock::now();
+        if (visualizer_) {
+            visualizer_->visualize(rgb, result.features, result.matches, prev_frame_);
         }
-
-        // 특징점 이미지 발행 (구독자가 있을 때만)
-        if (feature_img_pub_->get_subscription_count() > 0 && 
-            !features.visualization.empty()) {
-            
-            sensor_msgs::msg::Image::SharedPtr feature_msg = 
-                cv_bridge::CvImage(std_msgs::msg::Header(), "bgr8", 
-                                 features.visualization).toImageMsg();
-            feature_msg->header.stamp = current_time;
-            feature_msg->header.frame_id = "camera_frame";
-            
-            feature_img_pub_->publish(*feature_msg);
+        auto viz_end = std::chrono::steady_clock::now();
+        metrics.visualization_time = std::chrono::duration<double, std::milli>(
+            viz_end - viz_start).count();
+        
+        // 전체 처리 시간 계산
+        auto end_time = std::chrono::steady_clock::now();
+        metrics.processing_time = std::chrono::duration<double, std::milli>(
+            end_time - start_time).count();
+        
+        // 메모리 사용량과 큐 크기 추가
+        metrics.memory_usage = resource_monitor_->getMemoryUsage();
+        {
+            std::lock_guard<std::mutex> lock(image_queue_mutex_);
+            metrics.queue_size = image_queue_.size();
         }
+        
+        // 통합된 메트릭스 업데이트
+        logger_->updateMetrics(metrics);
+        
+        first_frame_ = false;
+        prev_frame_ = rgb.clone();
+        
     } catch (const std::exception& e) {
-        RCLCPP_ERROR(this->get_logger(), "Error in publishResults: %s", e.what());
+        logger_->logError("ImageProcessor", e.what());
     }
 }
 
@@ -549,12 +498,23 @@ void VisualOdometryNode::processingLoop() {
     while (rclcpp::ok() && !should_exit_) {
         std::unique_lock<std::mutex> lock(image_queue_mutex_);
         image_ready_.wait(lock, [this]() { return !image_queue_.empty(); });
+        
+        // 큐 크기 모니터링
+        size_t queue_size = image_queue_.size();
+        resource_monitor_->updateQueueSize(queue_size);
+        
+        // 큐 상태 로깅
+        if (queue_size > 5) {
+            logger_->logWarning("Queue", 
+                "Queue size is high: " + std::to_string(queue_size));
+        }
 
         auto [rgb, depth] = image_queue_.front();
         image_queue_.pop();
         lock.unlock();
 
         processImages(rgb, depth);
+        resource_monitor_->checkResources();
     }
 }
 

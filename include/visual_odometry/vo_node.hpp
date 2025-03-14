@@ -21,6 +21,8 @@
 #include "visual_odometry/feature_matcher.hpp"  // 추가
 #include "visual_odometry/visualization.hpp"  // 추가
 #include "visual_odometry/frame_processor.hpp"  // 추가
+#include "visual_odometry/logger.hpp"
+#include "visual_odometry/resource_monitor.hpp"
 
 namespace vo {
 
@@ -30,6 +32,10 @@ public:
     virtual ~VisualOdometryNode();
 
 private:
+    // 로깅 및 모니터링
+    std::unique_ptr<Logger> logger_;
+    std::unique_ptr<ResourceMonitor> resource_monitor_;
+
     // 파라미터 관련 메서드들
     void declareParameters();
     void applyCurrentParameters();  // 메서드 선언 추가

@@ -61,6 +61,8 @@ set(SOURCES
   src/zed_interface.cpp
   src/visualization.cpp
   src/frame_processor.cpp
+  src/resource_monitor.cpp
+  src/logger.cpp
 )
 
 # 실행 파일 추가

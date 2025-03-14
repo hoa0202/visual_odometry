@@ -18,6 +18,7 @@ public:
         FeatureMatches matches;
         double feature_detection_time{0.0};
         double feature_matching_time{0.0};
+        double visualization_time{0.0};
         bool is_keyframe{false};
     };
 

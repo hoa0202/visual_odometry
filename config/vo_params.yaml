@@ -2,7 +2,7 @@
   ros__parameters:
     # Input Source Settings
     input:
-      source: "ros2"  # "ros2" 또는 "zed_sdk"
+      source: "zed_sdk"  # "ros2" 또는 "zed_sdk"
       zed:
         serial_number: 42384922
         resolution: "HD1080"  # HD2K, HD1080, HD720
@@ -53,9 +53,9 @@
       feature_size: 3               # 특징점 크기 (1-10)
       line_thickness: 2             # 선 두께 (1-5)
       windows:
-        show_original: false         # 원본 이미지 윈도우
-        show_features: false         # 특징점 윈도우
-        show_matches: false          # 매칭 윈도우
+        show_original: true         # 원본 이미지 윈도우
+        show_features: true         # 특징점 윈도우
+        show_matches: true          # 매칭 윈도우
       window_names:
         original: "Original Image"
         features: "Feature Detection"
