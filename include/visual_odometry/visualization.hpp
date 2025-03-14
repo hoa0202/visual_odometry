@@ -28,6 +28,9 @@ public:
     void createWindows();
     void destroyWindows();
 
+    void setDisplayScale(float scale) { display_scale_ = scale; }
+    void setUseResize(bool use) { use_resize_ = use; }
+
 private:
     // 윈도우 설정
     int window_width_{800};
@@ -44,6 +47,10 @@ private:
     const std::string original_window_{"Original Image"};
     const std::string features_window_{"Feature Detection"};
     const std::string matches_window_{"Feature Matches"};
+    
+    // 시각화 설정
+    float display_scale_{0.5};  // 디스플레이 스케일 (50%)
+    bool use_resize_{true};     // 리사이징 사용 여부
     
     // 내부 시각화 메서드
     void showOriginalFrame(const cv::Mat& frame);
