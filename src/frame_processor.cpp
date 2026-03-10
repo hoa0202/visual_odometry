@@ -1,5 +1,6 @@
 #include "visual_odometry/frame_processor.hpp"
 #include <opencv2/imgproc.hpp>
+#include <opencv2/calib3d.hpp>
 #include <chrono>
 #include <rclcpp/rclcpp.hpp>
 
@@ -37,10 +38,29 @@ FrameProcessor::processFrame(const cv::Mat& rgb,
             std::chrono::steady_clock::now() - match_start).count();
 
         // 3D 점 생성: curr_points + curr_depth → backproject (prev_depth가 NaN인 경우 대비)
-        // PnP: objectPoints=curr 3D, imagePoints=prev 2D → R,t (curr→prev, 역변환으로 prev→curr)
+        // PnP: objectPoints=curr 3D, imagePoints=prev 2D → R,t (curr→prev)
         if (!result.matches.empty() && !depth.empty() &&
             camera_params.fx > 0 && camera_params.fy > 0) {
             backprojectAndFilter(result.matches, depth, camera_params, /*use_curr=*/true);
+
+            // PnP: solvePnPRansac
+            if (!result.matches.prev_points_3d.empty() &&
+                result.matches.prev_points_3d.size() >= 4) {
+                cv::Mat K = camera_params.getCameraMatrix();
+                cv::Mat distCoeffs = cv::Mat::zeros(4, 1, CV_64F);
+                cv::Mat rvec, tvec;
+                std::vector<int> inliers;
+                result.pnp_success = cv::solvePnPRansac(
+                    result.matches.prev_points_3d,
+                    result.matches.prev_points,
+                    K, distCoeffs, rvec, tvec,
+                    false, 100, 8.0, 0.99, inliers);
+                result.pnp_inliers = static_cast<int>(inliers.size());
+                if (result.pnp_success && !rvec.empty() && !tvec.empty()) {
+                    cv::Rodrigues(rvec, result.R);
+                    result.t = tvec;
+                }
+            }
         }
     }
 

@@ -20,6 +20,11 @@ public:
         double feature_matching_time{0.0};
         double visualization_time{0.0};
         bool is_keyframe{false};
+        // PnP 결과 (curr→prev)
+        bool pnp_success{false};
+        int pnp_inliers{0};
+        cv::Mat R;  // 3x3
+        cv::Mat t;  // 3x1
     };
 
     ProcessingResult processFrame(const cv::Mat& rgb,

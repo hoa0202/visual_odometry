@@ -29,6 +29,7 @@ find_package(cv_bridge REQUIRED)
 find_package(image_transport REQUIRED)
 find_package(ZED 3 REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(tf2_ros REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 
 # 메시지 생성 (ament_package 전에 호출)
@@ -84,6 +85,7 @@ ament_target_dependencies(vo_node
   image_transport
   geometry_msgs
   std_msgs
+  tf2_ros
 )
 
 # 설치 규칙

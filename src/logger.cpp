@@ -2,6 +2,7 @@
 #include <sstream>
 #include <iomanip>
 #include <deque>
+#include <cmath>
 
 namespace vo {
 
@@ -51,7 +52,15 @@ void Logger::updateMetrics(const ProcessingMetrics& metrics) {
            << "\n- Features: " << metrics.num_features
            << "\n- Matches: " << metrics.num_matches
            << " (" << std::setprecision(1) << (metrics.matching_ratio * 100) << "%)"
-           << "\n- 3D Points: " << metrics.num_3d_points;
+           << "\n- 3D Points: " << metrics.num_3d_points
+           << "\n- PnP: " << (metrics.pnp_success ? "OK" : "fail")
+           << " (inliers: " << metrics.pnp_inliers << ")"
+           << "\n- Pose: (" << std::setprecision(3) << metrics.pose_x << ", "
+           << metrics.pose_y << ", " << metrics.pose_z << ") m"
+           << " | rpy: (" << std::setprecision(2)
+           << (metrics.pose_roll * 180.0 / M_PI) << ", "
+           << (metrics.pose_pitch * 180.0 / M_PI) << ", "
+           << (metrics.pose_yaw * 180.0 / M_PI) << ") deg";
 
         RCLCPP_INFO(node_->get_logger(), "%s", ss.str().c_str());
         last_fps_update_ = current_time;

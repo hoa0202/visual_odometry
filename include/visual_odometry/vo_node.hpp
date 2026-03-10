@@ -15,6 +15,7 @@
 #include <queue>
 #include <condition_variable>
 #include <geometry_msgs/msg/pose_stamped.hpp>
+#include <tf2_ros/transform_broadcaster.h>
 #include "visual_odometry/msg/vo_state.hpp"
 #include <chrono>
 #include <future>  // std::async를 위해 추가
@@ -62,7 +63,8 @@ private:
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr feature_img_pub_;
     rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr pose_pub_;
     rclcpp::Publisher<visual_odometry::msg::VOState>::SharedPtr vo_state_pub_;
-    
+    std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
+
     // 파라미터 콜백 핸들
     OnSetParametersCallbackHandle::SharedPtr param_callback_handle_;
 
@@ -152,7 +154,7 @@ private:
                            const FeatureMatches& matches);
 
     // 결과 발행 함수 선언
-    void publishResults(const Features& features, const FeatureMatches& matches);
+    void publishResults(const ProcessingMetrics& metrics);
 
     // 특징점 검출 파라미터
     int max_features_{500};
@@ -167,6 +169,9 @@ private:
 
     // 컴포넌트들
     std::unique_ptr<FrameProcessor> frame_processor_;    // 추가
+
+    // 포즈 누적 (frame0 기준 카메라 pose)
+    cv::Mat T_global_;  // 4x4, 초기값 I
 
     // 평균 이동 거리 계산 함수
     float calculateAverageMovement(const FeatureMatches& matches);

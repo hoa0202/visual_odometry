@@ -52,6 +52,14 @@ struct ProcessingMetrics {
     double memory_usage{0.0};
     size_t queue_size{0};
     double processing_time{0.0};
+    bool pnp_success{false};
+    int pnp_inliers{0};
+    double pose_x{0.0};  // T_global translation (m)
+    double pose_y{0.0};
+    double pose_z{0.0};
+    double pose_roll{0.0};   // rad (X)
+    double pose_pitch{0.0};  // rad (Y)
+    double pose_yaw{0.0};    // rad (Z)
 };
 
 class Logger {

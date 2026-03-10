@@ -1,7 +1,10 @@
 #include "visual_odometry/vo_node.hpp"
 #include <cv_bridge/cv_bridge.h>
 #include <opencv2/imgproc.hpp>
+#include <cmath>
 #include "visual_odometry/msg/vo_state.hpp"
+#include <geometry_msgs/msg/pose_stamped.hpp>
+#include <geometry_msgs/msg/transform_stamped.hpp>
 #include "visual_odometry/visualization.hpp"
 #include "visual_odometry/frame_processor.hpp"
 #include "visual_odometry/logger.hpp"
@@ -107,6 +110,7 @@ VisualOdometryNode::VisualOdometryNode()
             "camera_pose", 10);
         vo_state_pub_ = this->create_publisher<visual_odometry::msg::VOState>(
             "vo_state", 10);
+        tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(this);
 
         // 이전 프레임 관련 변수 초기화
         prev_frame_ = cv::Mat();
@@ -132,6 +136,9 @@ VisualOdometryNode::VisualOdometryNode()
             feature_detector_,
             feature_matcher_
         );
+
+        // T_global 초기화 (4x4 identity)
+        T_global_ = cv::Mat::eye(4, 4, CV_64F);
 
         // ZED SDK 모드를 위한 타이머 추가
         if (input_source_ == "zed_sdk") {
@@ -219,6 +226,12 @@ void VisualOdometryNode::declareParameters()
 
     // 시각화 활성화 파라미터 추가
     this->declare_parameter("visualization.enable", true);
+
+    // VO 파라미터 (정지 시 드리프트 방지)
+    this->declare_parameter("vo.zero_motion_threshold_mm", 2.0);
+    this->declare_parameter("frames.frame_id", std::string("odom"));
+    this->declare_parameter("frames.child_frame_id", std::string("camera_link"));
+    this->declare_parameter("tf.publish", true);
 
     // 파라미터 값 로깅
     show_matches_ = this->get_parameter("visualization.windows.show_matches").as_bool();
@@ -511,7 +524,52 @@ void VisualOdometryNode::processImages(const cv::Mat& rgb, const cv::Mat& depth)
         metrics.num_3d_points = static_cast<int>(result.matches.prev_points_3d.size());
         metrics.matching_ratio = result.matches.matches.size() / 
             static_cast<double>(result.features.keypoints.size() + 1e-6);
-        
+        metrics.pnp_success = result.pnp_success;
+        metrics.pnp_inliers = result.pnp_inliers;
+
+        // 포즈 누적: PnP (curr→prev) → T_prev_curr → T_global
+        // zero_motion: |t| < threshold면 누적 스킵 (정지 시 드리프트 방지)
+        if (result.pnp_success && !result.R.empty() && !result.t.empty()) {
+            cv::Mat R_cp = result.R, t_cp = result.t;  // curr→prev
+            double t_norm = cv::norm(t_cp);
+            double thresh_mm = this->get_parameter("vo.zero_motion_threshold_mm").as_double();
+            if (t_norm >= thresh_mm) {
+                cv::Mat R_pc = R_cp.t();
+                cv::Mat t_pc = -R_pc * t_cp;  // prev→curr
+                cv::Mat T_pc = cv::Mat::eye(4, 4, CV_64F);
+                R_pc.copyTo(T_pc(cv::Rect(0, 0, 3, 3)));
+                t_pc.copyTo(T_pc(cv::Rect(3, 0, 1, 3)));
+                T_global_ = T_global_ * T_pc;
+            }
+        }
+        // REP 103: camera optical (X right, Y down, Z fwd) → ROS body (X fwd, Y left, Z up)
+        // 수정: X↔Y 스왑, Z 반전 → ros_x=-cam_x, ros_y=cam_z, ros_z=cam_y
+        static const cv::Mat R_cam_to_ros = (cv::Mat_<double>(3, 3) << -1, 0, 0, 0, 0, 1, 0, 1, 0);
+        cv::Mat t_cam(3, 1, CV_64F);
+        t_cam.at<double>(0, 0) = T_global_.at<double>(0, 3) / 1000.0;  // mm→m
+        t_cam.at<double>(1, 0) = T_global_.at<double>(1, 3) / 1000.0;
+        t_cam.at<double>(2, 0) = T_global_.at<double>(2, 3) / 1000.0;
+        cv::Mat t_ros = R_cam_to_ros * t_cam;
+        metrics.pose_x = -t_ros.at<double>(1, 0);  // X↔Y 스왑 + 부호 반전
+        metrics.pose_y = -t_ros.at<double>(0, 0);
+        metrics.pose_z = t_ros.at<double>(2, 0);
+        cv::Mat R_cam = T_global_(cv::Rect(0, 0, 3, 3));
+        cv::Mat R_ros = R_cam_to_ros * R_cam * R_cam_to_ros.t();
+        // X↔Y 스왑: S*R*S^T, S=[[0,1,0],[1,0,0],[0,0,1]]
+        static const cv::Mat S_xy = (cv::Mat_<double>(3, 3) << 0, 1, 0, 1, 0, 0, 0, 0, 1);
+        R_ros = S_xy * R_ros * S_xy.t();
+        double sy = std::sqrt(R_ros.at<double>(0,0)*R_ros.at<double>(0,0) + R_ros.at<double>(1,0)*R_ros.at<double>(1,0));
+        const double eps = 1e-6;
+        if (sy >= eps) {
+            metrics.pose_roll = std::atan2(R_ros.at<double>(2,1), R_ros.at<double>(2,2));
+            metrics.pose_pitch = std::atan2(-R_ros.at<double>(2,0), sy);
+            metrics.pose_yaw = -std::atan2(R_ros.at<double>(1,0), R_ros.at<double>(0,0));  // yaw 부호 반전
+        } else {
+            metrics.pose_roll = std::atan2(-R_ros.at<double>(1,2), R_ros.at<double>(1,1));
+            metrics.pose_pitch = std::atan2(-R_ros.at<double>(2,0), sy);
+            metrics.pose_yaw = 0.0;
+        }
+
         // 시각화 시간 측정
         auto viz_start = std::chrono::steady_clock::now();
         if (visualizer_) {
@@ -535,6 +593,11 @@ void VisualOdometryNode::processImages(const cv::Mat& rgb, const cv::Mat& depth)
         
         // 통합된 메트릭스 업데이트
         logger_->updateMetrics(metrics);
+
+        // 결과 발행 (publish_results 파라미터)
+        if (this->get_parameter("processing.publish_results").as_bool()) {
+            publishResults(metrics);
+        }
         
         first_frame_ = false;
         prev_frame_ = rgb.clone();
@@ -542,6 +605,58 @@ void VisualOdometryNode::processImages(const cv::Mat& rgb, const cv::Mat& depth)
     } catch (const std::exception& e) {
         logger_->logError("ImageProcessor", e.what());
     }
+}
+
+void VisualOdometryNode::publishResults(const ProcessingMetrics& metrics) {
+    auto stamp = this->now();
+    std::string frame_id = this->get_parameter("frames.frame_id").as_string();
+
+    // PoseStamped
+    geometry_msgs::msg::PoseStamped pose_msg;
+    pose_msg.header.stamp = stamp;
+    pose_msg.header.frame_id = frame_id;
+    pose_msg.pose.position.x = metrics.pose_x;
+    pose_msg.pose.position.y = metrics.pose_y;
+    pose_msg.pose.position.z = metrics.pose_z;
+    // roll, pitch, yaw → quaternion (ZYX)
+    double cr = std::cos(metrics.pose_roll * 0.5);
+    double sr = std::sin(metrics.pose_roll * 0.5);
+    double cp = std::cos(metrics.pose_pitch * 0.5);
+    double sp = std::sin(metrics.pose_pitch * 0.5);
+    double cy = std::cos(metrics.pose_yaw * 0.5);
+    double sy = std::sin(metrics.pose_yaw * 0.5);
+    pose_msg.pose.orientation.x = sr * cp * cy - cr * sp * sy;
+    pose_msg.pose.orientation.y = cr * sp * cy + sr * cp * sy;
+    pose_msg.pose.orientation.z = cr * cp * sy - sr * sp * cy;
+    pose_msg.pose.orientation.w = cr * cp * cy + sr * sp * sy;
+    pose_pub_->publish(pose_msg);
+
+    // TF (RViz 시각화용)
+    if (this->get_parameter("tf.publish").as_bool()) {
+        std::string child_frame_id = this->get_parameter("frames.child_frame_id").as_string();
+        geometry_msgs::msg::TransformStamped tf_msg;
+        tf_msg.header.stamp = stamp;
+        tf_msg.header.frame_id = frame_id;
+        tf_msg.child_frame_id = child_frame_id;
+        tf_msg.transform.translation.x = metrics.pose_x;
+        tf_msg.transform.translation.y = metrics.pose_y;
+        tf_msg.transform.translation.z = metrics.pose_z;
+        tf_msg.transform.rotation = pose_msg.pose.orientation;
+        tf_broadcaster_->sendTransform(tf_msg);
+    }
+
+    // VOState
+    visual_odometry::msg::VOState vo_msg;
+    vo_msg.header.stamp = stamp;
+    vo_msg.header.frame_id = frame_id;
+    vo_msg.pose = pose_msg.pose;
+    vo_msg.num_features = static_cast<uint32_t>(metrics.num_features);
+    vo_msg.num_matches = static_cast<uint32_t>(metrics.num_matches);
+    vo_msg.tracking_quality = static_cast<float>(metrics.pnp_success ?
+        std::min(1.0, metrics.pnp_inliers / 100.0) : 0.0);
+    vo_msg.scale_confidence = 1.0f;  // RGB-D: 고정 스케일
+    vo_msg.processing_time = static_cast<float>(metrics.processing_time);
+    vo_state_pub_->publish(vo_msg);
 }
 
 void VisualOdometryNode::processingLoop() {
