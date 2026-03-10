@@ -45,8 +45,8 @@ VisualOdometryNode::VisualOdometryNode()
         system_info.scale_factor = this->get_parameter("feature_detector.scale_factor").as_double();
         system_info.n_levels = this->get_parameter("feature_detector.n_levels").as_int();
         
-        // 입력 소스 설정
-        system_info.input_source = input_source_;
+        // 입력 소스 설정 (yaml 반영 - applyCurrentParameters 전에 param 직접 읽기)
+        system_info.input_source = this->get_parameter("input.source").as_string();
         system_info.rgb_topic = this->get_parameter("topics.rgb_image").as_string();
         system_info.depth_topic = this->get_parameter("topics.depth_image").as_string();
         system_info.camera_info_topic = this->get_parameter("topics.camera_info").as_string();
@@ -54,6 +54,14 @@ VisualOdometryNode::VisualOdometryNode()
         // 처리 설정
         system_info.queue_size = 5;  // 기본 큐 크기
         system_info.target_fps = 60.0;  // 목표 FPS
+
+        // 카메라 파라미터: camera_info 수신 전이므로 0 (로거에서 N/A 출력)
+        system_info.camera_width = 0;
+        system_info.camera_height = 0;
+        system_info.camera_fx = 0.0;
+        system_info.camera_fy = 0.0;
+        system_info.camera_cx = 0.0;
+        system_info.camera_cy = 0.0;
         
         // 시스템 정보 로깅
         logger_->logSystemInfo(system_info);
@@ -69,8 +77,9 @@ VisualOdometryNode::VisualOdometryNode()
         // 4. 나머지 파라미터 적용
         applyCurrentParameters();
     
-        // QoS 프로파일 설정
+        // QoS 프로파일 설정 (ZED sensor 토픽과 호환)
         auto qos = rclcpp::QoS(1).best_effort().durability_volatile();
+        auto sensor_qos = rclcpp::SensorDataQoS();
 
         // 토픽 이름 가져오기
         std::string rgb_topic = this->get_parameter("topics.rgb_image").as_string();
@@ -84,11 +93,11 @@ VisualOdometryNode::VisualOdometryNode()
         std::bind(&VisualOdometryNode::rgbCallback, this, std::placeholders::_1));
 
     depth_sub_ = this->create_subscription<sensor_msgs::msg::Image>(
-            depth_topic, 10,
+            depth_topic, sensor_qos,
         std::bind(&VisualOdometryNode::depthCallback, this, std::placeholders::_1));
 
     camera_info_sub_ = this->create_subscription<sensor_msgs::msg::CameraInfo>(
-            camera_info_topic, 10,
+            camera_info_topic, sensor_qos,
         std::bind(&VisualOdometryNode::cameraInfoCallback, this, std::placeholders::_1));
 
         // Publishers
@@ -290,6 +299,21 @@ void VisualOdometryNode::applyCurrentParameters() {
                 RCLCPP_ERROR(this->get_logger(), "Failed to connect to ZED camera");
                 return;
             }
+            // zed_sdk 모드: 카메라 파라미터 설정 (camera_info 토픽 없음)
+            cv::Mat K, D;
+            int w, h;
+            if (zed_interface_->getCameraParameters(K, D) && zed_interface_->getResolution(w, h)) {
+                camera_params_.fx = K.at<double>(0, 0);
+                camera_params_.fy = K.at<double>(1, 1);
+                camera_params_.cx = K.at<double>(0, 2);
+                camera_params_.cy = K.at<double>(1, 2);
+                camera_params_.width = w;
+                camera_params_.height = h;
+                camera_info_received_ = true;
+                RCLCPP_INFO(this->get_logger(),
+                    "Camera parameters (ZED SDK): %dx%d, fx=%.1f fy=%.1f cx=%.1f cy=%.1f",
+                    w, h, camera_params_.fx, camera_params_.fy, camera_params_.cx, camera_params_.cy);
+            }
         }
 
         // FPS 윈도우 크기 설정
@@ -368,7 +392,10 @@ void VisualOdometryNode::cameraInfoCallback(const sensor_msgs::msg::CameraInfo::
             camera_params_.height = msg->height;
 
             camera_info_received_ = true;
-            RCLCPP_INFO(this->get_logger(), "Camera parameters received");
+            RCLCPP_INFO(this->get_logger(),
+                "Camera parameters received: %dx%d, fx=%.1f fy=%.1f cx=%.1f cy=%.1f",
+                camera_params_.width, camera_params_.height,
+                camera_params_.fx, camera_params_.fy, camera_params_.cx, camera_params_.cy);
         }
     }
     catch (const std::exception& e) {
@@ -377,21 +404,31 @@ void VisualOdometryNode::cameraInfoCallback(const sensor_msgs::msg::CameraInfo::
 }
 
 void VisualOdometryNode::rgbCallback(const sensor_msgs::msg::Image::SharedPtr msg) {
+    // zed_sdk 모드: 큐 경로 사용, rgb 콜백 무시
+    if (input_source_ == "zed_sdk") {
+        return;
+    }
+
     try {
         // 큐 크기 업데이트
         {
             std::lock_guard<std::mutex> lock(image_queue_mutex_);
             resource_monitor_->updateQueueSize(image_queue_.size());
         }
-        
+
         cv_bridge::CvImageConstPtr cv_ptr = cv_bridge::toCvShare(msg);
         cv::Mat rgb = cv_ptr->image;
-        cv::Mat depth;  // depth는 depth 콜백에서 처리
-        
-        // 메모리 사용량 업데이트
+        cv::Mat depth;
+
+        // ros2 모드: 최신 depth와 페어링 (타임스탬프 근사 동기화)
+        {
+            std::lock_guard<std::mutex> lock(depth_mutex_);
+            if (!current_depth_.empty()) {
+                depth = current_depth_.clone();
+            }
+        }
+
         resource_monitor_->checkResources();
-        
-        // 공통 이미지 처리 함수 호출
         processImages(rgb, depth);
     }
     catch (const cv::Exception& e) {
@@ -400,17 +437,21 @@ void VisualOdometryNode::rgbCallback(const sensor_msgs::msg::Image::SharedPtr ms
 }
 
 void VisualOdometryNode::depthCallback(const sensor_msgs::msg::Image::SharedPtr msg) {
+    if (input_source_ == "zed_sdk") {
+        return;
+    }
+
     try {
         auto cv_ptr = cv_bridge::toCvShare(msg, sensor_msgs::image_encodings::TYPE_32FC1);
-        
+
+        std::lock_guard<std::mutex> lock(depth_mutex_);
         if (current_depth_.empty()) {
             current_depth_.create(cv_ptr->image.size(), cv_ptr->image.type());
-            prev_depth_.create(cv_ptr->image.size(), cv_ptr->image.type());  // previous_depth_ -> prev_depth_
+            prev_depth_.create(cv_ptr->image.size(), cv_ptr->image.type());
         }
-        
+
         cv_ptr->image.copyTo(current_depth_);
-        current_depth_.copyTo(prev_depth_);  // previous_depth_ -> prev_depth_
-        
+        current_depth_.copyTo(prev_depth_);
     } catch (const cv_bridge::Exception& e) {
         RCLCPP_ERROR(this->get_logger(), "cv_bridge exception: %s", e.what());
     }
@@ -446,8 +487,16 @@ void VisualOdometryNode::zedTimerCallback() {
 
 void VisualOdometryNode::processImages(const cv::Mat& rgb, const cv::Mat& depth) {
     try {
+        // depth 수신 확인 (한 번만 로그)
+        static bool depth_logged = false;
+        if (!depth_logged && !depth.empty()) {
+            RCLCPP_INFO(this->get_logger(), "Depth received: %dx%d (RGB-D sync OK)",
+                depth.cols, depth.rows);
+            depth_logged = true;
+        }
+
         auto start_time = std::chrono::steady_clock::now();
-        
+
         auto result = frame_processor_->processFrame(rgb, depth, first_frame_);
         
         // 리소스 모니터링 업데이트

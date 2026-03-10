@@ -4,16 +4,16 @@
     input:
       source: "zed_sdk"  # "ros2" 또는 "zed_sdk"
       zed:
-        serial_number: 42384922
-        resolution: "HD1080"  # HD2K, HD1080, HD720
+        serial_number: 35847285
+        resolution: "HD720"  # HD2K, HD1080, HD720
         fps: 60
-        depth_mode: "ULTRA"  # PERFORMANCE, QUALITY, ULTRA
+        depth_mode: "NEURAL_LIGHT"  # PERFORMANCE, QUALITY, ULTRA
         
     # Topic Settings (ROS2 source 사용시)
     topics:
-      rgb_image: "/zed/zed_node/rgb/image_rect_color"
+      rgb_image: "/zed/zed_node/rgb/color/rect/image"
       depth_image: "/zed/zed_node/depth/depth_registered"
-      camera_info: "/zed/zed_node/rgb/camera_info"
+      camera_info: "/zed/zed_node/rgb/color/rect/camera_info"
       feature_image: "feature_image"  # 발행할 토픽
       
     # Processing Parameters (연산 활성화 여부)

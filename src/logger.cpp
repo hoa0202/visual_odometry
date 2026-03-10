@@ -78,11 +78,19 @@ void Logger::logSystemInfo(const SystemInfo& info) {
        << "\n\n[Processing Settings]"
        << "\n- Queue Size: " << info.queue_size
        << "\n- Target FPS: " << info.target_fps
-       << "\n\n[Camera Parameters]"
-       << "\n- Resolution: " << info.camera_width << "x" << info.camera_height
-       << "\n- Focal Length: (fx=" << info.camera_fx << ", fy=" << info.camera_fy << ")"
-       << "\n- Principal Point: (cx=" << info.camera_cx << ", cy=" << info.camera_cy << ")"
-       << "\n\n============================================";
+       << "\n\n[Camera Parameters]";
+    if (info.camera_width > 0 && info.camera_height > 0) {
+        ss << "\n- Resolution: " << info.camera_width << "x" << info.camera_height
+           << "\n- Focal Length: (fx=" << std::fixed << std::setprecision(2) << info.camera_fx << ", fy=" << info.camera_fy << ")"
+           << "\n- Principal Point: (cx=" << info.camera_cx << ", cy=" << info.camera_cy << ")";
+    } else {
+        if (info.input_source == "zed_sdk") {
+            ss << "\n- N/A (will be set from ZED SDK on connect)";
+        } else {
+            ss << "\n- N/A (waiting for camera_info from " << info.camera_info_topic << ")";
+        }
+    }
+    ss << "\n\n============================================";
     
     RCLCPP_INFO(node_->get_logger(), "%s", ss.str().c_str());
 }

@@ -73,6 +73,7 @@ private:
     cv::Mat prev_frame_;
     cv::Mat current_depth_;
     cv::Mat prev_depth_;
+    std::mutex depth_mutex_;  // ros2 모드: rgb/depth 콜백 동시 접근 보호
 
     // 시각화 관련 변수들
     bool show_original_{false};

@@ -18,6 +18,7 @@ public:
     
     bool getImages(cv::Mat& rgb, cv::Mat& depth);
     bool getCameraParameters(cv::Mat& K, cv::Mat& D);
+    bool getResolution(int& width, int& height);
 
 private:
     sl::Camera zed_;

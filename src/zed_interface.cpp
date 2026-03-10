@@ -99,9 +99,17 @@ bool ZEDInterface::getCameraParameters(cv::Mat& K, cv::Mat& D) {
         left_cam.fx, 0, left_cam.cx,
         0, left_cam.fy, left_cam.cy,
         0, 0, 1);
-    
+
     D = cv::Mat::zeros(5, 1, CV_64F);  // ZED는 왜곡 보정이 이미 되어있음
-    
+
+    return true;
+}
+
+bool ZEDInterface::getResolution(int& width, int& height) {
+    if (!is_connected_) return false;
+    auto info = zed_.getCameraInformation();
+    width = info.camera_configuration.resolution.width;
+    height = info.camera_configuration.resolution.height;
     return true;
 }
 
