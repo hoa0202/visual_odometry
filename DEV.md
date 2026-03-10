@@ -40,6 +40,7 @@ ros2 topic echo /zed/zed_node/rgb/color/rect/image --no-arr
 | 파라미터 추가 | `vo_params.yaml` + `vo_node.cpp` | `declareParameters()`, `applyCurrentParameters()` |
 | 시각화 추가 | `visualization.cpp` | `visualize()` |
 | 메시지 발행 | `vo_node.cpp` | `processImages()` 내, `publishResults()` |
+| IMU-VO fusion | `imu_fusion.hpp`, `vo_node.cpp` | fusion_mode, complementary/ekf/factor_graph |
 
 ### 디버깅 체크리스트
 
@@ -101,6 +102,8 @@ cameraMatrix: K from camera_params_
 | 7 | PnP 포즈 추정 | ✅ 완료 | solvePnPRansac, R,t → 포즈 누적 |
 | 8 | 포즈 누적 | ✅ 완료 | T_global 누적, Pose (x,y,z) m 로그 |
 | 9 | 결과 발행 | ✅ 완료 | camera_pose, vo_state (publish_results 파라미터) |
+| 9a | IMU 발행 | ✅ 완료 | zed_sdk 모드, ZED2/ZED Mini, sensor_msgs/Imu |
+| 9b | IMU-VO fusion | ✅ 완료 | complementary (roll/pitch), ekf/factor_graph stub |
 | 10 | (선택) 스케일/최적화 | ❌ 미완료 | - |
 
 ---
@@ -119,6 +122,7 @@ visual_odometry/
 │   ├── frame_processor.hpp
 │   ├── image_processor.hpp
 │   ├── logger.hpp
+│   ├── imu_fusion.hpp
 │   ├── resource_monitor.hpp
 │   ├── types.hpp
 │   ├── visualization.hpp
@@ -166,6 +170,8 @@ camera_info_sub_ ─► cameraInfoCallback ─► camera_params_
 **zed_sdk 모드**:
 ```
 zed_timer_ ──► getImages(rgb,depth) ──► image_queue_ ──► processingLoop ──► processImages(rgb,depth)
+                    │
+                    └── getSensorsData() ──► imu_pub_ (imu.enable, ZED2/ZED Mini만)
 rgbCallback, depthCallback: early return (무시)
 ```
 
@@ -194,6 +200,11 @@ rgbCallback, depthCallback: early return (무시)
 | `topics.rgb_image` | /zed/zed_node/rgb/color/rect/image | ZED 버전에 따라 다를 수 있음 |
 | `topics.depth_image` | /zed/zed_node/depth/depth_registered | |
 | `topics.camera_info` | /zed/zed_node/rgb/color/rect/camera_info | |
+| `topics.imu` | imu | IMU 발행 토픽 (zed_sdk, ZED2/ZED Mini) |
+| `imu.enable` | true | IMU 발행 활성화 |
+| `imu.fusion_mode` | "none" | "none" \| "complementary" \| "ekf" \| "factor_graph" |
+| `imu.complementary_alpha` | 0.98 | complementary: gyro trust (0.95~0.99) |
+| `topics.imu_sub` | /zed/zed_node/imu/data | IMU 구독 (ros2, fusion 시) |
 
 **참고**: 일부 ZED wrapper는 `/zed/zed_node/rgb/image_rect_color`, `/zed/zed_node/rgb/camera_info` 사용.
 
@@ -201,7 +212,7 @@ rgbCallback, depthCallback: early return (무시)
 
 | 경로 | 기본값 |
 |------|--------|
-| `processing.enable_pose_estimation` | false |
+| `processing.enable_pose_estimation` | false | false 시 PnP/포즈 누적/발행 스킵 (odometry off) |
 | `processing.publish_results` | true |
 
 ### 5.2a Frame IDs / TF
@@ -249,6 +260,7 @@ ZED sensor 토픽과 호환되도록 설정됨.
 |------|------|------|
 | camera_pose | geometry_msgs/PoseStamped | 카메라 포즈 |
 | vo_state | visual_odometry/VOState | 포즈 + 특징점 수 + 품질 메트릭 |
+| imu | sensor_msgs/Imu | IMU (zed_sdk, ZED2/ZED Mini, imu.enable) |
 
 `publishResults()`: camera_pose (PoseStamped), vo_state (VOState) 발행. processing.publish_results로 on/off. TF: frames.frame_id→frames.child_frame_id. frames.*, tf.publish는 vo_params.yaml에서 설정.
 
@@ -272,6 +284,7 @@ ZED sensor 토픽과 호환되도록 설정됨.
 4. **Gtk-Message**: `Failed to load module "canberra-gtk-module"` — 무시 가능.
 5. **정지 시 드리프트**: depth/매칭 노이즈로 프레임당 소량 오차 누적. `vo.zero_motion_threshold_mm` (2mm) + `vo.zero_motion_rotation_threshold_rad` (0.002): |t|와 |θ| 둘 다 작으면 포즈 누적 스킵.
 5a. **좌표계**: REP 103. camera optical → ROS body. R_cam_to_ros + X↔Y 스왑 + pose_x/y/yaw 부호 반전.
+5b. **동적 물체**: 카메라 정지 시 멀리 움직이는 물체가 있으면 VO가 잘못된 motion 추정. complementary는 yaw/pos를 VO에 맡겨 검증 없음.
 6. **OpenCV 버전 충돌**: cv_bridge(4.5d) vs OpenCV 4.8 링커 경고 — 동작에는 영향 없음.
 
 ---
@@ -280,6 +293,10 @@ ZED sensor 토픽과 호환되도록 설정됨.
 
 ### 2026-03-10
 
+- **IMU-VO fusion**: complementary filter (roll/pitch from IMU, yaw/pos from VO). fusion_mode: none|complementary|ekf|factor_graph. IMU ZED→ROS REP 103 변환 (az,-ax,-ay), (gz,-gx,-gy).
+- **구독/발행 조건부**: zed_sdk 모드에서 rgb/depth/camera_info/imu 구독 미생성. ros2 모드에서 imu_pub 미생성.
+- **enable_pose_estimation**: 기본값 true (vo_params.yaml).
+- **IMU 발행**: zed_sdk 모드에서 getSensorsData(TIME_REFERENCE::IMAGE) → sensor_msgs/Imu. angular_velocity deg/s→rad/s, linear_acceleration m/s². topics.imu, imu.enable 파라미터. ZED2/ZED Mini만 is_available.
 - **3D 점 생성**: curr_points + curr_depth → backprojectAndFilter. ZED depth mm 단위 (50~20000). prev_depth NaN 대비 use_curr_points. 0 valid 시 원본 매칭 유지.
 - **Performance Metrics**: num_3d_points 추가 (1초마다 출력).
 - **버그 수정 #1, #2**: Source 로그 → get_parameter 직접 읽기. zed_sdk camera_params_ → connect 후 getCameraParameters()+getResolution() 호출.
@@ -305,10 +322,14 @@ ZED sensor 토픽과 호환되도록 설정됨.
 
 ### 다음 (우선순위)
 - [x] **zero_motion 회전 체크**: |θ| < zero_motion_rotation_threshold_rad (0.002) 추가
-- [ ] **enable_pose_estimation 연동**: false 시 PnP/포즈 누적/발행 스킵
-- [ ] **실험·평가**: 데이터셋, ATE/RPE, 처리 속도 (§12)
+- [x] **enable_pose_estimation 연동**: false 시 backproject+PnP/포즈 누적/발행 스킵
+- [x] **IMU 발행**: zed_sdk 모드, getSensorsData → sensor_msgs/Imu (ZED2/ZED Mini)
+- [ ] **실험·평가**: 데이터셋, ATE/RPE, 처리 속도 (§12) — 연구 진행 후 진행
 
 ### 선택
+- [x] **Complementary filter**: roll/pitch from IMU (accel+gyro), yaw/pos from VO. 한계: VO yaw/pos 무검증 — 동적 물체에 취약.
+- [ ] **EKF 15-state**: prediction IMU, update VO (다음 개발 우선순위)
+- [ ] **Factor graph + preintegration**: (stub)
 - [ ] 스케일 보정, 번들 조정, 루프 클로저
 
 ---

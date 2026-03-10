@@ -15,6 +15,7 @@
 #include <queue>
 #include <condition_variable>
 #include <geometry_msgs/msg/pose_stamped.hpp>
+#include <sensor_msgs/msg/imu.hpp>
 #include <tf2_ros/transform_broadcaster.h>
 #include "visual_odometry/msg/vo_state.hpp"
 #include <chrono>
@@ -24,6 +25,7 @@
 #include "visual_odometry/frame_processor.hpp"  // 추가
 #include "visual_odometry/logger.hpp"
 #include "visual_odometry/resource_monitor.hpp"
+#include "visual_odometry/imu_fusion.hpp"
 
 namespace vo {
 
@@ -63,6 +65,7 @@ private:
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr feature_img_pub_;
     rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr pose_pub_;
     rclcpp::Publisher<visual_odometry::msg::VOState>::SharedPtr vo_state_pub_;
+    rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr imu_pub_;
     std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
 
     // 파라미터 콜백 핸들
@@ -172,6 +175,14 @@ private:
 
     // 포즈 누적 (frame0 기준 카메라 pose)
     cv::Mat T_global_;  // 4x4, 초기값 I
+
+    // IMU-VO fusion
+    std::unique_ptr<ImuFusionBase> imu_fusion_;
+    ImuData latest_imu_;
+    std::mutex imu_mutex_;
+    rclcpp::Time last_fusion_time_;
+    rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_;
+    void imuCallback(const sensor_msgs::msg::Imu::SharedPtr msg);
 
     // 평균 이동 거리 계산 함수
     float calculateAverageMovement(const FeatureMatches& matches);

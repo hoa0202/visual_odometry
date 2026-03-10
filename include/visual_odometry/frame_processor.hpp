@@ -30,7 +30,8 @@ public:
     ProcessingResult processFrame(const cv::Mat& rgb,
                                 const cv::Mat& depth,
                                 const CameraParams& camera_params,
-                                bool first_frame = false);
+                                bool first_frame = false,
+                                bool enable_pose_estimation = true);
 
     void setPreviousFrame(const cv::Mat& frame, const cv::Mat& depth,
                          const Features& features);

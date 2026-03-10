@@ -5,6 +5,8 @@
 #include "visual_odometry/msg/vo_state.hpp"
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
+#include <sensor_msgs/msg/imu.hpp>
+#include <sl/Camera.hpp>
 #include "visual_odometry/visualization.hpp"
 #include "visual_odometry/frame_processor.hpp"
 #include "visual_odometry/logger.hpp"
@@ -90,27 +92,45 @@ VisualOdometryNode::VisualOdometryNode()
         std::string camera_info_topic = this->get_parameter("topics.camera_info").as_string();
         std::string feature_topic = this->get_parameter("topics.feature_image").as_string();
 
-    // Subscribers
-    rgb_sub_ = this->create_subscription<sensor_msgs::msg::Image>(
-            rgb_topic, qos,
-        std::bind(&VisualOdometryNode::rgbCallback, this, std::placeholders::_1));
-
-    depth_sub_ = this->create_subscription<sensor_msgs::msg::Image>(
-            depth_topic, sensor_qos,
-        std::bind(&VisualOdometryNode::depthCallback, this, std::placeholders::_1));
-
-    camera_info_sub_ = this->create_subscription<sensor_msgs::msg::CameraInfo>(
-            camera_info_topic, sensor_qos,
-        std::bind(&VisualOdometryNode::cameraInfoCallback, this, std::placeholders::_1));
+        // Subscribers (ros2 모드에서만 — zed_sdk는 SDK 직접 사용)
+        if (input_source_ == "ros2") {
+            rgb_sub_ = this->create_subscription<sensor_msgs::msg::Image>(
+                rgb_topic, qos,
+                std::bind(&VisualOdometryNode::rgbCallback, this, std::placeholders::_1));
+            depth_sub_ = this->create_subscription<sensor_msgs::msg::Image>(
+                depth_topic, sensor_qos,
+                std::bind(&VisualOdometryNode::depthCallback, this, std::placeholders::_1));
+            camera_info_sub_ = this->create_subscription<sensor_msgs::msg::CameraInfo>(
+                camera_info_topic, sensor_qos,
+                std::bind(&VisualOdometryNode::cameraInfoCallback, this, std::placeholders::_1));
+            std::string imu_sub_topic = this->get_parameter("topics.imu_sub").as_string();
+            imu_sub_ = this->create_subscription<sensor_msgs::msg::Imu>(
+                imu_sub_topic, rclcpp::SensorDataQoS(),
+                std::bind(&VisualOdometryNode::imuCallback, this, std::placeholders::_1));
+        }
 
         // Publishers
-    feature_img_pub_ = this->create_publisher<sensor_msgs::msg::Image>(
+        feature_img_pub_ = this->create_publisher<sensor_msgs::msg::Image>(
             feature_topic, 10);
         pose_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(
             "camera_pose", 10);
         vo_state_pub_ = this->create_publisher<visual_odometry::msg::VOState>(
             "vo_state", 10);
+        if (input_source_ == "zed_sdk") {
+            imu_pub_ = this->create_publisher<sensor_msgs::msg::Imu>(
+                this->get_parameter("topics.imu").as_string(), 10);
+        }
         tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(this);
+
+        // IMU subscription (ros2 mode) + fusion
+        std::string fusion_mode = this->get_parameter("imu.fusion_mode").as_string();
+        if (fusion_mode != "none") {
+            imu_fusion_ = createImuFusion(fusion_mode,
+                this->get_parameter("imu.complementary_alpha").as_double());
+            if (imu_fusion_) {
+                RCLCPP_INFO(this->get_logger(), "IMU fusion: %s", fusion_mode.c_str());
+            }
+        }
 
         // 이전 프레임 관련 변수 초기화
         prev_frame_ = cv::Mat();
@@ -201,6 +221,11 @@ void VisualOdometryNode::declareParameters()
     this->declare_parameter("topics.depth_image", "/zed/zed_node/depth/depth_registered");
     this->declare_parameter("topics.camera_info", "/zed/zed_node/rgb/camera_info");
     this->declare_parameter("topics.feature_image", "feature_image");
+    this->declare_parameter("topics.imu", "imu");
+    this->declare_parameter("topics.imu_sub", "/zed/zed_node/imu/data");
+    this->declare_parameter("imu.fusion_mode", std::string("none"));
+    this->declare_parameter("imu.complementary_alpha", 0.98);
+    this->declare_parameter("imu.enable", true);
 
     // 입력 소스 파라미터
     this->declare_parameter("input.source", "ros2");
@@ -450,6 +475,18 @@ void VisualOdometryNode::rgbCallback(const sensor_msgs::msg::Image::SharedPtr ms
     }
 }
 
+void VisualOdometryNode::imuCallback(const sensor_msgs::msg::Imu::SharedPtr msg) {
+    std::lock_guard<std::mutex> lock(imu_mutex_);
+    latest_imu_.ang_vel_x = msg->angular_velocity.x;
+    latest_imu_.ang_vel_y = msg->angular_velocity.y;
+    latest_imu_.ang_vel_z = msg->angular_velocity.z;
+    latest_imu_.lin_acc_x = msg->linear_acceleration.x;
+    latest_imu_.lin_acc_y = msg->linear_acceleration.y;
+    latest_imu_.lin_acc_z = msg->linear_acceleration.z;
+    latest_imu_.timestamp = rclcpp::Time(msg->header.stamp).seconds();
+    latest_imu_.valid = true;
+}
+
 void VisualOdometryNode::depthCallback(const sensor_msgs::msg::Image::SharedPtr msg) {
     if (input_source_ == "zed_sdk") {
         return;
@@ -477,10 +514,36 @@ bool VisualOdometryNode::getImages(cv::Mat& rgb, cv::Mat& depth) {
             RCLCPP_ERROR(this->get_logger(), "ZED camera is not connected!");
             return false;
         }
-        return zed_interface_->getImages(rgb, depth);
+        sl::SensorsData sensors;
+        bool ok = zed_interface_->getImages(rgb, depth, &sensors);
+        if (ok && sensors.imu.is_available) {
+            {
+                std::lock_guard<std::mutex> lock(imu_mutex_);
+                latest_imu_.ang_vel_x = sensors.imu.angular_velocity.x * M_PI / 180.0;
+                latest_imu_.ang_vel_y = sensors.imu.angular_velocity.y * M_PI / 180.0;
+                latest_imu_.ang_vel_z = sensors.imu.angular_velocity.z * M_PI / 180.0;
+                latest_imu_.lin_acc_x = sensors.imu.linear_acceleration.x;
+                latest_imu_.lin_acc_y = sensors.imu.linear_acceleration.y;
+                latest_imu_.lin_acc_z = sensors.imu.linear_acceleration.z;
+                latest_imu_.timestamp = this->now().seconds();
+                latest_imu_.valid = true;
+            }
+            if (imu_pub_ && this->get_parameter("imu.enable").as_bool()) {
+                sensor_msgs::msg::Imu imu_msg;
+            imu_msg.header.stamp = this->now();
+            imu_msg.header.frame_id = this->get_parameter("frames.child_frame_id").as_string();
+            imu_msg.angular_velocity.x = sensors.imu.angular_velocity.x * M_PI / 180.0;
+            imu_msg.angular_velocity.y = sensors.imu.angular_velocity.y * M_PI / 180.0;
+            imu_msg.angular_velocity.z = sensors.imu.angular_velocity.z * M_PI / 180.0;
+            imu_msg.linear_acceleration.x = sensors.imu.linear_acceleration.x;
+            imu_msg.linear_acceleration.y = sensors.imu.linear_acceleration.y;
+            imu_msg.linear_acceleration.z = sensors.imu.linear_acceleration.z;
+            imu_msg.orientation_covariance[0] = -1;  // orientation unknown
+                imu_pub_->publish(imu_msg);
+            }
+        }
+        return ok;
     }
-    
-    // ROS2 토픽을 통해 이미지를 받는 경우는 기존 콜백에서 처리
     return false;
 }
 
@@ -510,8 +573,8 @@ void VisualOdometryNode::processImages(const cv::Mat& rgb, const cv::Mat& depth)
         }
 
         auto start_time = std::chrono::steady_clock::now();
-
-        auto result = frame_processor_->processFrame(rgb, depth, camera_params_, first_frame_);
+        bool enable_pose = this->get_parameter("processing.enable_pose_estimation").as_bool();
+        auto result = frame_processor_->processFrame(rgb, depth, camera_params_, first_frame_, enable_pose);
 
         // 리소스 모니터링 업데이트
         resource_monitor_->updateProcessingTime(result.feature_detection_time);
@@ -528,9 +591,9 @@ void VisualOdometryNode::processImages(const cv::Mat& rgb, const cv::Mat& depth)
         metrics.pnp_success = result.pnp_success;
         metrics.pnp_inliers = result.pnp_inliers;
 
-        // 포즈 누적: PnP (curr→prev) → T_prev_curr → T_global
+        // 포즈 누적: PnP (curr→prev) → T_prev_curr → T_global (enable_pose_estimation 시에만)
         // zero_motion: |t| < thresh_mm AND |θ| < thresh_rad 이면 누적 스킵 (정지 시 드리프트 방지)
-        if (result.pnp_success && !result.R.empty() && !result.t.empty()) {
+        if (enable_pose && result.pnp_success && !result.R.empty() && !result.t.empty()) {
             cv::Mat R_cp = result.R, t_cp = result.t;  // curr→prev
             double t_norm = cv::norm(t_cp);
             double trace_R = R_cp.at<double>(0,0) + R_cp.at<double>(1,1) + R_cp.at<double>(2,2);
@@ -546,32 +609,76 @@ void VisualOdometryNode::processImages(const cv::Mat& rgb, const cv::Mat& depth)
                 T_global_ = T_global_ * T_pc;
             }
         }
-        // REP 103: camera optical (X right, Y down, Z fwd) → ROS body (X fwd, Y left, Z up)
-        // 수정: X↔Y 스왑, Z 반전 → ros_x=-cam_x, ros_y=cam_z, ros_z=cam_y
-        static const cv::Mat R_cam_to_ros = (cv::Mat_<double>(3, 3) << -1, 0, 0, 0, 0, 1, 0, 1, 0);
-        cv::Mat t_cam(3, 1, CV_64F);
-        t_cam.at<double>(0, 0) = T_global_.at<double>(0, 3) / 1000.0;  // mm→m
-        t_cam.at<double>(1, 0) = T_global_.at<double>(1, 3) / 1000.0;
-        t_cam.at<double>(2, 0) = T_global_.at<double>(2, 3) / 1000.0;
-        cv::Mat t_ros = R_cam_to_ros * t_cam;
-        metrics.pose_x = -t_ros.at<double>(1, 0);  // X↔Y 스왑 + 부호 반전
-        metrics.pose_y = -t_ros.at<double>(0, 0);
-        metrics.pose_z = t_ros.at<double>(2, 0);
-        cv::Mat R_cam = T_global_(cv::Rect(0, 0, 3, 3));
-        cv::Mat R_ros = R_cam_to_ros * R_cam * R_cam_to_ros.t();
-        // X↔Y 스왑: S*R*S^T, S=[[0,1,0],[1,0,0],[0,0,1]]
-        static const cv::Mat S_xy = (cv::Mat_<double>(3, 3) << 0, 1, 0, 1, 0, 0, 0, 0, 1);
-        R_ros = S_xy * R_ros * S_xy.t();
-        double sy = std::sqrt(R_ros.at<double>(0,0)*R_ros.at<double>(0,0) + R_ros.at<double>(1,0)*R_ros.at<double>(1,0));
-        const double eps = 1e-6;
-        if (sy >= eps) {
-            metrics.pose_roll = std::atan2(R_ros.at<double>(2,1), R_ros.at<double>(2,2));
-            metrics.pose_pitch = std::atan2(-R_ros.at<double>(2,0), sy);
-            metrics.pose_yaw = -std::atan2(R_ros.at<double>(1,0), R_ros.at<double>(0,0));  // yaw 부호 반전
-        } else {
-            metrics.pose_roll = std::atan2(-R_ros.at<double>(1,2), R_ros.at<double>(1,1));
-            metrics.pose_pitch = std::atan2(-R_ros.at<double>(2,0), sy);
-            metrics.pose_yaw = 0.0;
+        // REP 103: pose 변환 (enable_pose_estimation 시에만, 아니면 0 유지)
+        if (enable_pose) {
+            static const cv::Mat R_cam_to_ros = (cv::Mat_<double>(3, 3) << -1, 0, 0, 0, 0, 1, 0, 1, 0);
+            cv::Mat t_cam(3, 1, CV_64F);
+            t_cam.at<double>(0, 0) = T_global_.at<double>(0, 3) / 1000.0;  // mm→m
+            t_cam.at<double>(1, 0) = T_global_.at<double>(1, 3) / 1000.0;
+            t_cam.at<double>(2, 0) = T_global_.at<double>(2, 3) / 1000.0;
+            cv::Mat t_ros = R_cam_to_ros * t_cam;
+            metrics.pose_x = -t_ros.at<double>(1, 0);  // X↔Y 스왑 + 부호 반전
+            metrics.pose_y = -t_ros.at<double>(0, 0);
+            metrics.pose_z = t_ros.at<double>(2, 0);
+            cv::Mat R_cam = T_global_(cv::Rect(0, 0, 3, 3));
+            cv::Mat R_ros = R_cam_to_ros * R_cam * R_cam_to_ros.t();
+            static const cv::Mat S_xy = (cv::Mat_<double>(3, 3) << 0, 1, 0, 1, 0, 0, 0, 0, 1);
+            R_ros = S_xy * R_ros * S_xy.t();
+            double sy = std::sqrt(R_ros.at<double>(0,0)*R_ros.at<double>(0,0) + R_ros.at<double>(1,0)*R_ros.at<double>(1,0));
+            const double eps = 1e-6;
+            if (sy >= eps) {
+                metrics.pose_roll = std::atan2(R_ros.at<double>(2,1), R_ros.at<double>(2,2));
+                metrics.pose_pitch = std::atan2(-R_ros.at<double>(2,0), sy);
+                metrics.pose_yaw = -std::atan2(R_ros.at<double>(1,0), R_ros.at<double>(0,0));
+            } else {
+                metrics.pose_roll = std::atan2(-R_ros.at<double>(1,2), R_ros.at<double>(1,1));
+                metrics.pose_pitch = std::atan2(-R_ros.at<double>(2,0), sy);
+                metrics.pose_yaw = 0.0;
+            }
+        }
+
+        // IMU-VO fusion (fusion_mode != "none")
+        if (enable_pose && imu_fusion_) {
+            if (first_frame_) {
+                imu_fusion_->reset();
+            }
+            ImuData imu;
+            {
+                std::lock_guard<std::mutex> lock(imu_mutex_);
+                imu = latest_imu_;
+            }
+            // IMU: ZED(IMAGE, X right Y down Z forward) → ROS REP 103 (X forward Y left Z up)
+            // acc_ros=(az,-ax,-ay), gyro_ros=(gz,-gx,-gy). level시 gravity=(0,0,-9.8)
+            if (imu.valid) {
+                double ax = imu.lin_acc_x, ay = imu.lin_acc_y, az = imu.lin_acc_z;
+                double gx = imu.ang_vel_x, gy = imu.ang_vel_y, gz = imu.ang_vel_z;
+                imu.lin_acc_x = az;
+                imu.lin_acc_y = -ax;
+                imu.lin_acc_z = -ay;
+                imu.ang_vel_x = gz;
+                imu.ang_vel_y = -gx;
+                imu.ang_vel_z = -gy;
+            }
+            double dt = (last_fusion_time_.nanoseconds() > 0) ?
+                (this->now() - last_fusion_time_).seconds() : 0.02;
+            last_fusion_time_ = this->now();
+
+            PoseInput vo_in;
+            vo_in.x = metrics.pose_x;
+            vo_in.y = metrics.pose_y;
+            vo_in.z = metrics.pose_z;
+            vo_in.roll = metrics.pose_roll;
+            vo_in.pitch = metrics.pose_pitch;
+            vo_in.yaw = metrics.pose_yaw;
+            vo_in.valid = true;
+
+            PoseOutput fused = imu_fusion_->fuse(vo_in, imu, dt);
+            metrics.pose_x = fused.x;
+            metrics.pose_y = fused.y;
+            metrics.pose_z = fused.z;
+            metrics.pose_roll = fused.roll;
+            metrics.pose_pitch = fused.pitch;
+            metrics.pose_yaw = fused.yaw;
         }
 
         // 시각화 시간 측정
@@ -598,8 +705,8 @@ void VisualOdometryNode::processImages(const cv::Mat& rgb, const cv::Mat& depth)
         // 통합된 메트릭스 업데이트
         logger_->updateMetrics(metrics);
 
-        // 결과 발행 (publish_results 파라미터)
-        if (this->get_parameter("processing.publish_results").as_bool()) {
+        // 결과 발행 (publish_results AND enable_pose_estimation)
+        if (this->get_parameter("processing.publish_results").as_bool() && enable_pose) {
             publishResults(metrics);
         }
         

@@ -19,7 +19,8 @@ FrameProcessor::ProcessingResult
 FrameProcessor::processFrame(const cv::Mat& rgb,
                             const cv::Mat& depth,
                             const CameraParams& camera_params,
-                            bool first_frame) {
+                            bool first_frame,
+                            bool enable_pose_estimation) {
     ProcessingResult result;
 
     cv::Mat gray = preprocessFrame(rgb);
@@ -37,9 +38,8 @@ FrameProcessor::processFrame(const cv::Mat& rgb,
         result.feature_matching_time = std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - match_start).count();
 
-        // 3D 점 생성: curr_points + curr_depth → backproject (prev_depth가 NaN인 경우 대비)
-        // PnP: objectPoints=curr 3D, imagePoints=prev 2D → R,t (curr→prev)
-        if (!result.matches.empty() && !depth.empty() &&
+        // 3D 점 생성 + PnP (enable_pose_estimation 시에만)
+        if (enable_pose_estimation && !result.matches.empty() && !depth.empty() &&
             camera_params.fx > 0 && camera_params.fy > 0) {
             backprojectAndFilter(result.matches, depth, camera_params, /*use_curr=*/true);
 

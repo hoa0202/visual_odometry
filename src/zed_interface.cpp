@@ -63,7 +63,7 @@ void ZEDInterface::disconnect() {
     }
 }
 
-bool ZEDInterface::getImages(cv::Mat& rgb, cv::Mat& depth) {
+bool ZEDInterface::getImages(cv::Mat& rgb, cv::Mat& depth, sl::SensorsData* sensors) {
     static sl::Mat zed_rgb;  // 정적 버퍼 재사용
     static sl::Mat zed_depth;
     
@@ -74,6 +74,10 @@ bool ZEDInterface::getImages(cv::Mat& rgb, cv::Mat& depth) {
     
     if (zed_.grab(params) != sl::ERROR_CODE::SUCCESS) {
         return false;
+    }
+    
+    if (sensors) {
+        zed_.getSensorsData(*sensors, sl::TIME_REFERENCE::IMAGE);
     }
     
     // 최소한의 처리로 이미지 획득

@@ -15,13 +15,21 @@
       depth_image: "/zed/zed_node/depth/depth_registered"
       camera_info: "/zed/zed_node/rgb/color/rect/camera_info"
       feature_image: "feature_image"  # 발행할 토픽
+      imu: "imu"  # IMU 발행 토픽 (zed_sdk 모드, ZED2/ZED Mini만)
+      imu_sub: "/zed/zed_node/imu/data"  # IMU 구독 (ros2 모드, fusion 시)
       
     # Processing Parameters (연산 활성화 여부)
     processing:
       enable_feature_detection: true   # 특징점 검출 활성화
       enable_feature_matching: true    # 특징점 매칭 활성화
-      enable_pose_estimation: false     # 포즈 추정 활성화
+      enable_pose_estimation: true     # 포즈 추정 활성화
       publish_results: true            # 결과 토픽 발행 활성화
+
+    # IMU (zed_sdk 모드, ZED2/ZED Mini만)
+    imu:
+      enable: true  # IMU 발행 활성화
+      fusion_mode: "complementary"  # "none" | "complementary" | "ekf" | "factor_graph"
+      complementary_alpha: 0.98  # complementary filter: gyro trust (0.95~0.99)
 
     # Frame IDs (PoseStamped, VOState, TF)
     frames:

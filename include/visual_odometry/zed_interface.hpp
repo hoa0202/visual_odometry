@@ -16,7 +16,7 @@ public:
     void disconnect();
     bool isConnected() const;
     
-    bool getImages(cv::Mat& rgb, cv::Mat& depth);
+    bool getImages(cv::Mat& rgb, cv::Mat& depth, sl::SensorsData* sensors = nullptr);
     bool getCameraParameters(cv::Mat& K, cv::Mat& D);
     bool getResolution(int& width, int& height);
 
