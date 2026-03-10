@@ -39,21 +39,22 @@ struct Features {
 // 매칭 결과를 저장하는 구조체 추가
 struct FeatureMatches {
     std::vector<cv::DMatch> matches;           // 매칭 결과
-    std::vector<cv::Point2f> prev_points;      // 이전 프레임의 매칭점 좌표
-    std::vector<cv::Point2f> curr_points;      // 현재 프레임의 매칭점 좌표
-    
-    // 메모리 예약을 위한 메서드 추가
+    std::vector<cv::Point2f> prev_points;      // 이전 프레임의 매칭점 좌표 (2D)
+    std::vector<cv::Point2f> curr_points;      // 현재 프레임의 매칭점 좌표 (2D)
+    std::vector<cv::Point3f> prev_points_3d;  // 이전 프레임 3D 점 (카메라 좌표계, PnP용)
+
     void reserve(size_t size) {
         matches.reserve(size);
         prev_points.reserve(size);
         curr_points.reserve(size);
+        prev_points_3d.reserve(size);
     }
-    
-    // 매칭 결과 초기화
+
     void clear() {
         matches.clear();
         prev_points.clear();
         curr_points.clear();
+        prev_points_3d.clear();
     }
     
     // 매칭 개수 반환

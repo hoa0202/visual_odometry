@@ -497,8 +497,8 @@ void VisualOdometryNode::processImages(const cv::Mat& rgb, const cv::Mat& depth)
 
         auto start_time = std::chrono::steady_clock::now();
 
-        auto result = frame_processor_->processFrame(rgb, depth, first_frame_);
-        
+        auto result = frame_processor_->processFrame(rgb, depth, camera_params_, first_frame_);
+
         // 리소스 모니터링 업데이트
         resource_monitor_->updateProcessingTime(result.feature_detection_time);
         
@@ -508,6 +508,7 @@ void VisualOdometryNode::processImages(const cv::Mat& rgb, const cv::Mat& depth)
         metrics.matching_time = result.feature_matching_time;
         metrics.num_features = result.features.keypoints.size();
         metrics.num_matches = result.matches.matches.size();
+        metrics.num_3d_points = static_cast<int>(result.matches.prev_points_3d.size());
         metrics.matching_ratio = result.matches.matches.size() / 
             static_cast<double>(result.features.keypoints.size() + 1e-6);
         

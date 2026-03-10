@@ -46,14 +46,14 @@ ros2 topic echo /zed/zed_node/rgb/color/rect/image --no-arr
 ### 개발 시 자주 쓰는 수식 (복붙용)
 
 ```
-# 2D + depth → 3D backproject
+# 2D + depth → 3D backproject (ZED depth: mm)
 X = (u - cx) * Z / fx
 Y = (v - cy) * Z / fy
 Z = depth.at<float>(v, u)
 
-# solvePnP 입력
-objectPoints: prev 프레임 3D (Nx3)
-imagePoints: curr 프레임 2D (Nx2)
+# solvePnP 입력 (curr 3D + prev 2D)
+objectPoints: prev_points_3d (curr 프레임 3D)
+imagePoints: prev_points (prev 프레임 2D)
 cameraMatrix: K from camera_params_
 ```
 
@@ -91,7 +91,7 @@ cameraMatrix: K from camera_params_
 | 3 | 특징점 매칭 | ✅ 완료 | 2D-2D, RANSAC |
 | 4 | 카메라 내부 파라미터 | ✅ 완료 | camera_info |
 | 5 | RGB-D 동기화 | ✅ 완료 | ros2: current_depth_ 전달, zed_sdk: 큐 경로 |
-| 6 | 3D 점 생성 | ❌ 미완료 | depth backproject |
+| 6 | 3D 점 생성 | ✅ 완료 | prev_points + prev_depth → backprojectAndFilter |
 | 7 | PnP 포즈 추정 | ❌ 미완료 | solvePnPRansac |
 | 8 | 포즈 누적 | ❌ 미완료 | T_global 누적 |
 | 9 | 결과 발행 | ❌ 미완료 | pose_pub_, vo_state_pub_ |
@@ -173,7 +173,7 @@ rgbCallback, depthCallback: early return (무시)
 |--------|------|
 | `CameraParams` | fx, fy, cx, cy, width, height, getCameraMatrix() |
 | `Features` | keypoints, descriptors, visualization |
-| `FeatureMatches` | matches, prev_points, curr_points (2D) |
+| `FeatureMatches` | matches, prev_points, curr_points (2D), prev_points_3d |
 | `ProcessingResult` | features, matches, feature_detection_time, feature_matching_time |
 
 ---
@@ -246,9 +246,10 @@ ZED sensor 토픽과 호환되도록 설정됨.
 ## 9. 알려진 이슈 (버그 아님)
 
 1. **ros2 RGB-D 근사 동기화**: rgb/depth 별도 콜백이라 타임스탬프 정확 동기화 아님. 최신 depth 사용.
-2. **camera_info 초기 로그**: 수신 전에는 "N/A (waiting for camera_info...)" 출력 (정상).
-3. **Gtk-Message**: `Failed to load module "canberra-gtk-module"` — 무시 가능.
-4. **OpenCV 버전 충돌**: cv_bridge(4.5d) vs OpenCV 4.8 링커 경고 — 동작에는 영향 없음.
+2. **ZED depth 단위**: zed_interface에서 mm 반환 (7948=7.9m). backprojectAndFilter에서 50~20000 범위 사용.
+3. **camera_info 초기 로그**: 수신 전에는 "N/A (waiting for camera_info...)" 출력 (정상).
+4. **Gtk-Message**: `Failed to load module "canberra-gtk-module"` — 무시 가능.
+5. **OpenCV 버전 충돌**: cv_bridge(4.5d) vs OpenCV 4.8 링커 경고 — 동작에는 영향 없음.
 
 ---
 
@@ -256,6 +257,8 @@ ZED sensor 토픽과 호환되도록 설정됨.
 
 ### 2026-03-10
 
+- **3D 점 생성**: curr_points + curr_depth → backprojectAndFilter. ZED depth mm 단위 (50~20000). prev_depth NaN 대비 use_curr_points. 0 valid 시 원본 매칭 유지.
+- **Performance Metrics**: num_3d_points 추가 (1초마다 출력).
 - **버그 수정 #1, #2**: Source 로그 → get_parameter 직접 읽기. zed_sdk camera_params_ → connect 후 getCameraParameters()+getResolution() 호출.
 - **RGB-D 동기화 (ros2/zed_sdk)**: ros2 모드에서 rgbCallback이 current_depth_를 processImages에 전달. depth_mutex_로 동시 접근 보호. zed_sdk 모드에서는 rgb/depth 콜백 early return, 큐 경로만 사용.
 - **DEV.md 생성**: 개발서 초안 작성
@@ -268,7 +271,7 @@ ZED sensor 토픽과 호환되도록 설정됨.
 ## 11. 다음 작업 체크리스트
 
 - [x] rgbCallback에서 current_depth_를 processImages에 전달 (ros2/zed_sdk 모드 분리)
-- [ ] 3D 점 생성: prev_points 2D + depth → backproject
+- [x] 3D 점 생성: curr_points + curr_depth → backprojectAndFilter (ZED mm: 50~20000)
 - [ ] PnP: solvePnPRansac(prev_3d, curr_2d, K) → R, t
 - [ ] 포즈 누적: T_global
 - [ ] publishResults 구현: pose_pub_, vo_state_pub_

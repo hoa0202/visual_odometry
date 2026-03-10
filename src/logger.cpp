@@ -49,8 +49,9 @@ void Logger::updateMetrics(const ProcessingMetrics& metrics) {
            << "\n- Memory Usage: " << metrics.memory_usage << " MB"
            << "\n- Queue Size: " << metrics.queue_size
            << "\n- Features: " << metrics.num_features
-           << "\n- Matches: " << metrics.num_matches 
-           << " (" << std::setprecision(1) << (metrics.matching_ratio * 100) << "%)";
+           << "\n- Matches: " << metrics.num_matches
+           << " (" << std::setprecision(1) << (metrics.matching_ratio * 100) << "%)"
+           << "\n- 3D Points: " << metrics.num_3d_points;
 
         RCLCPP_INFO(node_->get_logger(), "%s", ss.str().c_str());
         last_fps_update_ = current_time;

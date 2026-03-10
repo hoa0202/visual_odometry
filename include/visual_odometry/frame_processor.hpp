@@ -22,23 +22,27 @@ public:
         bool is_keyframe{false};
     };
 
-    ProcessingResult processFrame(const cv::Mat& rgb, 
+    ProcessingResult processFrame(const cv::Mat& rgb,
                                 const cv::Mat& depth,
+                                const CameraParams& camera_params,
                                 bool first_frame = false);
 
-    // 이전 프레임 정보 설정
-    void setPreviousFrame(const cv::Mat& frame, const Features& features);
+    void setPreviousFrame(const cv::Mat& frame, const cv::Mat& depth,
+                         const Features& features);
 
 private:
     // 컴포넌트들
     std::shared_ptr<FeatureDetector> feature_detector_;
     std::shared_ptr<FeatureMatcher> feature_matcher_;
 
-    // 이전 프레임 데이터
     cv::Mat prev_frame_gray_;
+    cv::Mat prev_depth_;
     Features prev_features_;
 
-    // 내부 처리 메서드들
+    void backprojectAndFilter(FeatureMatches& matches,
+                              const cv::Mat& depth,
+                              const CameraParams& camera_params,
+                              bool use_curr_points = false);  // true: curr 2D+depth → 3D (prev_depth NaN 대비)
     cv::Mat preprocessFrame(const cv::Mat& rgb);
     Features detectFeatures(const cv::Mat& gray);
     FeatureMatches matchFeatures(const Features& curr_features, 

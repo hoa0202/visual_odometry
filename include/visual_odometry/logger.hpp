@@ -46,6 +46,7 @@ struct ProcessingMetrics {
     double visualization_time{0.0};
     int num_features{0};
     int num_matches{0};
+    int num_3d_points{0};
     double matching_ratio{0.0};
     double avg_movement{0.0};
     double memory_usage{0.0};
