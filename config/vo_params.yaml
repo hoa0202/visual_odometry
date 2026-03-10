@@ -91,4 +91,5 @@
       ransac_threshold: 3.0
       keyframe_rotation_threshold: 0.1  # radians
       keyframe_translation_threshold: 0.1  # meters
-      zero_motion_threshold_mm: 2.0  # 정지 시 드리프트 방지: |t| < 이 값이면 포즈 누적 스킵 
+      zero_motion_threshold_mm: 2.0  # 정지 시: |t| < 이 값이면
+      zero_motion_rotation_threshold_rad: 0.002  # |θ| < 이 값(rad)이면 포즈 누적 스킵 (t와 θ 둘 다 작을 때) 

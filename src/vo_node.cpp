@@ -229,6 +229,7 @@ void VisualOdometryNode::declareParameters()
 
     // VO 파라미터 (정지 시 드리프트 방지)
     this->declare_parameter("vo.zero_motion_threshold_mm", 2.0);
+    this->declare_parameter("vo.zero_motion_rotation_threshold_rad", 0.002);
     this->declare_parameter("frames.frame_id", std::string("odom"));
     this->declare_parameter("frames.child_frame_id", std::string("camera_link"));
     this->declare_parameter("tf.publish", true);
@@ -528,12 +529,15 @@ void VisualOdometryNode::processImages(const cv::Mat& rgb, const cv::Mat& depth)
         metrics.pnp_inliers = result.pnp_inliers;
 
         // 포즈 누적: PnP (curr→prev) → T_prev_curr → T_global
-        // zero_motion: |t| < threshold면 누적 스킵 (정지 시 드리프트 방지)
+        // zero_motion: |t| < thresh_mm AND |θ| < thresh_rad 이면 누적 스킵 (정지 시 드리프트 방지)
         if (result.pnp_success && !result.R.empty() && !result.t.empty()) {
             cv::Mat R_cp = result.R, t_cp = result.t;  // curr→prev
             double t_norm = cv::norm(t_cp);
+            double trace_R = R_cp.at<double>(0,0) + R_cp.at<double>(1,1) + R_cp.at<double>(2,2);
+            double rot_angle = std::acos(std::min(1.0, std::max(-1.0, (trace_R - 1.0) / 2.0)));
             double thresh_mm = this->get_parameter("vo.zero_motion_threshold_mm").as_double();
-            if (t_norm >= thresh_mm) {
+            double thresh_rad = this->get_parameter("vo.zero_motion_rotation_threshold_rad").as_double();
+            if (t_norm >= thresh_mm || rot_angle >= thresh_rad) {
                 cv::Mat R_pc = R_cp.t();
                 cv::Mat t_pc = -R_pc * t_cp;  // prev→curr
                 cv::Mat T_pc = cv::Mat::eye(4, 4, CV_64F);

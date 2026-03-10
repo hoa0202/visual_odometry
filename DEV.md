@@ -212,6 +212,13 @@ rgbCallback, depthCallback: early return (무시)
 | `frames.child_frame_id` | "camera_link" | TF child (RViz) |
 | `tf.publish` | true | TF 발행 여부 |
 
+### 5.2b VO (zero_motion)
+
+| 경로 | 기본값 | 설명 |
+|------|--------|------|
+| `vo.zero_motion_threshold_mm` | 2.0 | \|t\| < 이 값 |
+| `vo.zero_motion_rotation_threshold_rad` | 0.002 | \|θ\| < 이 값. t와 θ 둘 다 작으면 포즈 누적 스킵 |
+
 ### 5.3 특징점
 
 | 경로 | 기본값 |
@@ -263,7 +270,7 @@ ZED sensor 토픽과 호환되도록 설정됨.
 2. **ZED depth 단위**: zed_interface에서 mm 반환 (7948=7.9m). backprojectAndFilter에서 50~20000 범위 사용.
 3. **camera_info 초기 로그**: 수신 전에는 "N/A (waiting for camera_info...)" 출력 (정상).
 4. **Gtk-Message**: `Failed to load module "canberra-gtk-module"` — 무시 가능.
-5. **정지 시 드리프트**: depth/매칭 노이즈로 프레임당 소량 오차 누적. `vo.zero_motion_threshold_mm` (기본 2mm): |t| < 이 값이면 포즈 누적 스킵.
+5. **정지 시 드리프트**: depth/매칭 노이즈로 프레임당 소량 오차 누적. `vo.zero_motion_threshold_mm` (2mm) + `vo.zero_motion_rotation_threshold_rad` (0.002): |t|와 |θ| 둘 다 작으면 포즈 누적 스킵.
 5a. **좌표계**: REP 103. camera optical → ROS body. R_cam_to_ros + X↔Y 스왑 + pose_x/y/yaw 부호 반전.
 6. **OpenCV 버전 충돌**: cv_bridge(4.5d) vs OpenCV 4.8 링커 경고 — 동작에는 영향 없음.
 
@@ -297,7 +304,7 @@ ZED sensor 토픽과 호환되도록 설정됨.
 - [x] 좌표계: REP 103, X↔Y 스왑, x/y/yaw 부호 반전
 
 ### 다음 (우선순위)
-- [ ] **드리프트 개선**: zero_motion 회전 체크, threshold 튜닝, 또는 키프레임 리셋
+- [x] **zero_motion 회전 체크**: |θ| < zero_motion_rotation_threshold_rad (0.002) 추가
 - [ ] **enable_pose_estimation 연동**: false 시 PnP/포즈 누적/발행 스킵
 - [ ] **실험·평가**: 데이터셋, ATE/RPE, 처리 속도 (§12)
 
