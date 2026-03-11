@@ -2,6 +2,8 @@
 #include <cv_bridge/cv_bridge.h>
 #include <opencv2/imgproc.hpp>
 #include <cmath>
+#include <tf2/LinearMath/Matrix3x3.h>
+#include <tf2/LinearMath/Quaternion.h>
 #include "visual_odometry/msg/vo_state.hpp"
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
@@ -121,12 +123,18 @@ VisualOdometryNode::VisualOdometryNode()
                 this->get_parameter("topics.imu").as_string(), 10);
         }
         tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(this);
+        static_tf_broadcaster_ = std::make_unique<tf2_ros::StaticTransformBroadcaster>(this);
+        publishStaticTransform();
 
         // IMU subscription (ros2 mode) + fusion
         std::string fusion_mode = this->get_parameter("imu.fusion_mode").as_string();
         if (fusion_mode != "none") {
+            vo::EKFParams ekf;
+            ekf.chi2_threshold = this->get_parameter("imu.ekf.chi2_threshold").as_double();
+            ekf.huber_pos_m = this->get_parameter("imu.ekf.huber_pos_m").as_double();
+            ekf.huber_rot_rad = this->get_parameter("imu.ekf.huber_rot_rad").as_double();
             imu_fusion_ = createImuFusion(fusion_mode,
-                this->get_parameter("imu.complementary_alpha").as_double());
+                this->get_parameter("imu.complementary_alpha").as_double(), ekf);
             if (imu_fusion_) {
                 RCLCPP_INFO(this->get_logger(), "IMU fusion: %s", fusion_mode.c_str());
             }
@@ -226,6 +234,9 @@ void VisualOdometryNode::declareParameters()
     this->declare_parameter("imu.fusion_mode", std::string("none"));
     this->declare_parameter("imu.complementary_alpha", 0.98);
     this->declare_parameter("imu.enable", true);
+    this->declare_parameter("imu.ekf.chi2_threshold", 16.8);
+    this->declare_parameter("imu.ekf.huber_pos_m", 0.1);
+    this->declare_parameter("imu.ekf.huber_rot_rad", 0.1);
 
     // 입력 소스 파라미터
     this->declare_parameter("input.source", "ros2");
@@ -591,48 +602,55 @@ void VisualOdometryNode::processImages(const cv::Mat& rgb, const cv::Mat& depth)
         metrics.pnp_success = result.pnp_success;
         metrics.pnp_inliers = result.pnp_inliers;
 
-        // 포즈 누적: PnP (curr→prev) → T_prev_curr → T_global (enable_pose_estimation 시에만)
-        // zero_motion: |t| < thresh_mm AND |θ| < thresh_rad 이면 누적 스킵 (정지 시 드리프트 방지)
+        // 포즈 누적: ZED wrapper와 동일하게 T_prev_from_curr 직접 사용
+        // solvePnP(curr_3d, prev_2d) → R,t = T_prev_from_curr (world→camera)
+        // ZED: mOdom2BaseTransf = mOdom2BaseTransf * deltaOdomTf (delta=T_prev_from_curr)
+        // T_global_ = T_0_from_curr: odom에서 본 카메라 pose (translation=위치)
         if (enable_pose && result.pnp_success && !result.R.empty() && !result.t.empty()) {
-            cv::Mat R_cp = result.R, t_cp = result.t;  // curr→prev
+            cv::Mat R_cp = result.R, t_cp = result.t;  // T_prev_from_curr
             double t_norm = cv::norm(t_cp);
             double trace_R = R_cp.at<double>(0,0) + R_cp.at<double>(1,1) + R_cp.at<double>(2,2);
             double rot_angle = std::acos(std::min(1.0, std::max(-1.0, (trace_R - 1.0) / 2.0)));
             double thresh_mm = this->get_parameter("vo.zero_motion_threshold_mm").as_double();
             double thresh_rad = this->get_parameter("vo.zero_motion_rotation_threshold_rad").as_double();
             if (t_norm >= thresh_mm || rot_angle >= thresh_rad) {
-                cv::Mat R_pc = R_cp.t();
-                cv::Mat t_pc = -R_pc * t_cp;  // prev→curr
-                cv::Mat T_pc = cv::Mat::eye(4, 4, CV_64F);
-                R_pc.copyTo(T_pc(cv::Rect(0, 0, 3, 3)));
-                t_pc.copyTo(T_pc(cv::Rect(3, 0, 1, 3)));
-                T_global_ = T_global_ * T_pc;
+                cv::Mat T_cp = cv::Mat::eye(4, 4, CV_64F);
+                R_cp.copyTo(T_cp(cv::Rect(0, 0, 3, 3)));
+                t_cp.copyTo(T_cp(cv::Rect(3, 0, 1, 3)));
+                T_global_ = T_global_ * T_cp;  // T_0_from_curr = T_0_from_prev * T_prev_from_curr
             }
         }
-        // REP 103: pose 변환 (enable_pose_estimation 시에만, 아니면 0 유지)
+        // === 좌표계: optical → body (odom→camera_link) ===
+        // T_global_ = T_0_from_curr: p_0 = R*p_curr + t → translation = curr 원점의 frame0 좌표
         if (enable_pose) {
-            static const cv::Mat R_cam_to_ros = (cv::Mat_<double>(3, 3) << -1, 0, 0, 0, 0, 1, 0, 1, 0);
-            cv::Mat t_cam(3, 1, CV_64F);
-            t_cam.at<double>(0, 0) = T_global_.at<double>(0, 3) / 1000.0;  // mm→m
-            t_cam.at<double>(1, 0) = T_global_.at<double>(1, 3) / 1000.0;
-            t_cam.at<double>(2, 0) = T_global_.at<double>(2, 3) / 1000.0;
-            cv::Mat t_ros = R_cam_to_ros * t_cam;
-            metrics.pose_x = -t_ros.at<double>(1, 0);  // X↔Y 스왑 + 부호 반전
-            metrics.pose_y = -t_ros.at<double>(0, 0);
-            metrics.pose_z = t_ros.at<double>(2, 0);
-            cv::Mat R_cam = T_global_(cv::Rect(0, 0, 3, 3));
-            cv::Mat R_ros = R_cam_to_ros * R_cam * R_cam_to_ros.t();
-            static const cv::Mat S_xy = (cv::Mat_<double>(3, 3) << 0, 1, 0, 1, 0, 0, 0, 0, 1);
-            R_ros = S_xy * R_ros * S_xy.t();
-            double sy = std::sqrt(R_ros.at<double>(0,0)*R_ros.at<double>(0,0) + R_ros.at<double>(1,0)*R_ros.at<double>(1,0));
+            cv::Mat R_0_from_curr = T_global_(cv::Rect(0, 0, 3, 3));
+            cv::Mat t_curr_in_0(3, 1, CV_64F);
+            t_curr_in_0.at<double>(0, 0) = T_global_.at<double>(0, 3) / 1000.0;
+            t_curr_in_0.at<double>(1, 0) = T_global_.at<double>(1, 3) / 1000.0;
+            t_curr_in_0.at<double>(2, 0) = T_global_.at<double>(2, 3) / 1000.0;
+            // t_curr_in_0 = curr 원점의 frame0 좌표 (이미 pose 위치)
+            cv::Mat t_opt = t_curr_in_0;
+            static const cv::Mat R_opt_to_body = (cv::Mat_<double>(3, 3) << 0, 0, 1, -1, 0, 0, 0, -1, 0);
+            cv::Mat t_body = R_opt_to_body * t_opt;
+            metrics.pose_x = t_body.at<double>(0, 0);
+            metrics.pose_y = t_body.at<double>(1, 0);
+            metrics.pose_z = t_body.at<double>(2, 0);
+            // R_body_from_odom: odom=body 프레임으로 정렬. R_0_from_curr는 optical이므로 body로 similarity 변환
+            // R_body = R_opt_to_body * R_0_from_curr.t() * R_opt_to_body.t() → 정지 시 I
+            cv::Mat R_body = R_opt_to_body * R_0_from_curr.t() * R_opt_to_body.t();
+            // TF 규약: odom→camera_link는 child→parent 변환. p_odom = R_odom_from_camera_link * p_camera_link
+            // 따라서 R_odom_from_camera_link = R_body.t() 발행. RPY는 역회전 → 부호 반전
+            cv::Mat R_tf = R_body.t();
+            double sy = std::sqrt(R_tf.at<double>(0,0)*R_tf.at<double>(0,0) +
+                                 R_tf.at<double>(1,0)*R_tf.at<double>(1,0));
             const double eps = 1e-6;
             if (sy >= eps) {
-                metrics.pose_roll = std::atan2(R_ros.at<double>(2,1), R_ros.at<double>(2,2));
-                metrics.pose_pitch = std::atan2(-R_ros.at<double>(2,0), sy);
-                metrics.pose_yaw = -std::atan2(R_ros.at<double>(1,0), R_ros.at<double>(0,0));
+                metrics.pose_roll = std::atan2(R_tf.at<double>(2,1), R_tf.at<double>(2,2));
+                metrics.pose_pitch = std::atan2(-R_tf.at<double>(2,0), sy);
+                metrics.pose_yaw = std::atan2(R_tf.at<double>(1,0), R_tf.at<double>(0,0));
             } else {
-                metrics.pose_roll = std::atan2(-R_ros.at<double>(1,2), R_ros.at<double>(1,1));
-                metrics.pose_pitch = std::atan2(-R_ros.at<double>(2,0), sy);
+                metrics.pose_roll = std::atan2(-R_tf.at<double>(1,2), R_tf.at<double>(1,1));
+                metrics.pose_pitch = std::atan2(-R_tf.at<double>(2,0), sy);
                 metrics.pose_yaw = 0.0;
             }
         }
@@ -670,7 +688,7 @@ void VisualOdometryNode::processImages(const cv::Mat& rgb, const cv::Mat& depth)
             vo_in.roll = metrics.pose_roll;
             vo_in.pitch = metrics.pose_pitch;
             vo_in.yaw = metrics.pose_yaw;
-            vo_in.valid = true;
+            vo_in.valid = metrics.pnp_success;  // PnP 실패 시 stale pose → EKF가 position hold
 
             PoseOutput fused = imu_fusion_->fuse(vo_in, imu, dt);
             metrics.pose_x = fused.x;
@@ -718,6 +736,25 @@ void VisualOdometryNode::processImages(const cv::Mat& rgb, const cv::Mat& depth)
     }
 }
 
+void VisualOdometryNode::publishStaticTransform() {
+    geometry_msgs::msg::TransformStamped static_tf;
+    static_tf.header.stamp = this->now();
+    static_tf.header.frame_id = "camera_link";
+    static_tf.child_frame_id = "camera_optical_frame";
+    static_tf.transform.translation.x = 0.0;
+    static_tf.transform.translation.y = 0.0;
+    static_tf.transform.translation.z = 0.0;
+    // REP 103: body (X fwd Y left Z up) → optical (X right Y down Z forward)
+    tf2::Matrix3x3 R_opt_to_body(0, 0, 1, -1, 0, 0, 0, -1, 0);
+    tf2::Quaternion q;
+    R_opt_to_body.getRotation(q);
+    static_tf.transform.rotation.x = q.x();
+    static_tf.transform.rotation.y = q.y();
+    static_tf.transform.rotation.z = q.z();
+    static_tf.transform.rotation.w = q.w();
+    static_tf_broadcaster_->sendTransform(static_tf);
+}
+
 void VisualOdometryNode::publishResults(const ProcessingMetrics& metrics) {
     auto stamp = this->now();
     std::string frame_id = this->get_parameter("frames.frame_id").as_string();
@@ -729,17 +766,15 @@ void VisualOdometryNode::publishResults(const ProcessingMetrics& metrics) {
     pose_msg.pose.position.x = metrics.pose_x;
     pose_msg.pose.position.y = metrics.pose_y;
     pose_msg.pose.position.z = metrics.pose_z;
-    // roll, pitch, yaw → quaternion (ZYX)
-    double cr = std::cos(metrics.pose_roll * 0.5);
-    double sr = std::sin(metrics.pose_roll * 0.5);
-    double cp = std::cos(metrics.pose_pitch * 0.5);
-    double sp = std::sin(metrics.pose_pitch * 0.5);
-    double cy = std::cos(metrics.pose_yaw * 0.5);
-    double sy = std::sin(metrics.pose_yaw * 0.5);
-    pose_msg.pose.orientation.x = sr * cp * cy - cr * sp * sy;
-    pose_msg.pose.orientation.y = cr * sp * cy + sr * cp * sy;
-    pose_msg.pose.orientation.z = cr * cp * sy - sr * sp * cy;
-    pose_msg.pose.orientation.w = cr * cp * cy + sr * sp * sy;
+    // roll, pitch, yaw (REP 103: X,Y,Z fixed) → quaternion via tf2 (ZYX intrinsic)
+    tf2::Matrix3x3 R;
+    R.setRPY(metrics.pose_roll, metrics.pose_pitch, metrics.pose_yaw);
+    tf2::Quaternion q;
+    R.getRotation(q);
+    pose_msg.pose.orientation.x = q.x();
+    pose_msg.pose.orientation.y = q.y();
+    pose_msg.pose.orientation.z = q.z();
+    pose_msg.pose.orientation.w = q.w();
     pose_pub_->publish(pose_msg);
 
     // TF (RViz 시각화용)

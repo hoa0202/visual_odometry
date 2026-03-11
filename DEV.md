@@ -103,7 +103,7 @@ cameraMatrix: K from camera_params_
 | 8 | 포즈 누적 | ✅ 완료 | T_global 누적, Pose (x,y,z) m 로그 |
 | 9 | 결과 발행 | ✅ 완료 | camera_pose, vo_state (publish_results 파라미터) |
 | 9a | IMU 발행 | ✅ 완료 | zed_sdk 모드, ZED2/ZED Mini, sensor_msgs/Imu |
-| 9b | IMU-VO fusion | ✅ 완료 | complementary (roll/pitch), ekf/factor_graph stub |
+| 9b | IMU-VO fusion | ✅ 완료 | complementary, EKF 15-state (p,v,rpy,bias), factor_graph stub |
 | 10 | (선택) 스케일/최적화 | ❌ 미완료 | - |
 
 ---
@@ -123,6 +123,7 @@ visual_odometry/
 │   ├── image_processor.hpp
 │   ├── logger.hpp
 │   ├── imu_fusion.hpp
+│   ├── imu_fusion_ekf.hpp
 │   ├── resource_monitor.hpp
 │   ├── types.hpp
 │   ├── visualization.hpp
@@ -137,6 +138,8 @@ visual_odometry/
 │   ├── feature_matcher.cpp
 │   ├── frame_processor.cpp
 │   ├── image_processor.cpp
+│   ├── imu_fusion_ekf.cpp
+│   ├── imu_fusion_factory.cpp
 │   ├── logger.cpp
 │   ├── main.cpp
 │   ├── resource_monitor.cpp
@@ -283,17 +286,49 @@ ZED sensor 토픽과 호환되도록 설정됨.
 3. **camera_info 초기 로그**: 수신 전에는 "N/A (waiting for camera_info...)" 출력 (정상).
 4. **Gtk-Message**: `Failed to load module "canberra-gtk-module"` — 무시 가능.
 5. **정지 시 드리프트**: depth/매칭 노이즈로 프레임당 소량 오차 누적. `vo.zero_motion_threshold_mm` (2mm) + `vo.zero_motion_rotation_threshold_rad` (0.002): |t|와 |θ| 둘 다 작으면 포즈 누적 스킵.
-5a. **좌표계**: REP 103. camera optical → ROS body. R_cam_to_ros + X↔Y 스왑 + pose_x/y/yaw 부호 반전.
+5a. **좌표계**: odom→camera_link (body, X fwd Y left Z up) + camera_link→camera_optical_frame (static). R_opt_to_body로 optical→body 변환.
 5b. **동적 물체**: 카메라 정지 시 멀리 움직이는 물체가 있으면 VO가 잘못된 motion 추정. complementary는 yaw/pos를 VO에 맡겨 검증 없음.
 6. **OpenCV 버전 충돌**: cv_bridge(4.5d) vs OpenCV 4.8 링커 경고 — 동작에는 영향 없음.
+
+### 9a. 좌표계 (odom→camera_link→camera_optical_frame)
+
+**TF 구조**: odom → camera_link (body) → camera_optical_frame (static)
+
+| frame | convention |
+|-------|------------|
+| odom | body: X forward, Y left, Z up (REP 103) |
+| camera_link | body: odom과 동일 축 정렬 (정지 시 I) |
+| camera_optical_frame | optical: X right, Y down, Z forward (OpenCV) |
+
+**R_opt_to_body** (optical→body): `[[0,0,1],[-1,0,0],[0,-1,0]]` — X_body=Z_opt, Y_body=-X_opt, Z_body=-Y_opt
+
+**포즈 누적 (ZED wrapper 동일)**:
+- solvePnP(curr_3d, prev_2d) → R,t = T_prev_from_curr (world→camera)
+- 역변환 없이 직접 사용: `T_global_ = T_global_ * T_cp`
+- T_global_ = T_0_from_curr: translation = curr 원점의 frame0 좌표 (mm→m /1000)
+
+**위치**: `t_body = R_opt_to_body * t_curr_in_0`
+
+**회전 (3단계)**:
+1. R_body = R_opt_to_body * R_0_from_curr.t() * R_opt_to_body.t() — optical→body similarity 변환, 정지 시 I
+2. TF 규약: odom→camera_link는 child→parent. p_odom = R_odom_from_camera_link * p_camera_link
+3. 발행: R_tf = R_body.t() (R_odom_from_camera_link)
 
 ---
 
 ## 10. 변경 이력 (Changelog)
 
+### 2026-03-11 — VO 좌표변환 완료
+
+- **포즈 누적 (ZED wrapper 정렬)**: solvePnP 출력 T_prev_from_curr를 역변환 없이 직접 사용. `T_global_ = T_global_ * T_cp`. ZED `getPosition(CAMERA)` delta와 동일 규약.
+- **위치 추출**: T_0_from_curr에서 translation = curr 원점의 frame0 좌표. t_body = R_opt_to_body * t_curr_in_0.
+- **회전 similarity 변환**: R_body = R_opt_to_body * R_0_from_curr.t() * R_opt_to_body.t(). optical 프레임 회전을 body로 변환, 정지 시 I → camera_link가 odom과 축 정렬.
+- **TF 규약 수정**: odom→camera_link는 child→parent 변환. R_odom_from_camera_link = R_body.t() 발행. 회전 역방향 문제 해결.
+- **yaw 추출**: tf2 getRPY와 동일하게 atan2(R(1,0), R(0,0)) 사용 (부호 반전 제거).
+
 ### 2026-03-10
 
-- **IMU-VO fusion**: complementary filter (roll/pitch from IMU, yaw/pos from VO). fusion_mode: none|complementary|ekf|factor_graph. IMU ZED→ROS REP 103 변환 (az,-ax,-ay), (gz,-gx,-gy).
+- **IMU-VO fusion**: complementary filter (roll/pitch from IMU, yaw/pos from VO). EKF 15-state (p,v,rpy,gyro_bias,accel_bias): predict from IMU, update from VO pose. fusion_mode: none|complementary|ekf|factor_graph. IMU ZED→ROS REP 103 변환 (az,-ax,-ay), (gz,-gx,-gy).
 - **구독/발행 조건부**: zed_sdk 모드에서 rgb/depth/camera_info/imu 구독 미생성. ros2 모드에서 imu_pub 미생성.
 - **enable_pose_estimation**: 기본값 true (vo_params.yaml).
 - **IMU 발행**: zed_sdk 모드에서 getSensorsData(TIME_REFERENCE::IMAGE) → sensor_msgs/Imu. angular_velocity deg/s→rad/s, linear_acceleration m/s². topics.imu, imu.enable 파라미터. ZED2/ZED Mini만 is_available.
@@ -306,7 +341,7 @@ ZED sensor 토픽과 호환되도록 설정됨.
 - **QoS 변경**: camera_info, depth 구독을 `SensorDataQoS()`로 변경 (ZED 호환)
 - **camera_info 로그**: 수신 시 `Camera parameters received: WxH, fx=... fy=...` 출력 추가
 - **publishResults**: camera_pose, vo_state, TF (odom→camera_link) 발행. frames.frame_id, frames.child_frame_id, tf.publish 파라미터.
-- **좌표계**: REP 103 변환 + X↔Y 스왑 + pose_x/y/yaw 부호 반전 (ZED/ROS 정렬).
+- **좌표계**: ZED IMAGE→ROS REP 103. R_zed_to_ros, t_curr_in_f0=-R^T*t, tf2 quaternion.
 
 ---
 
@@ -396,14 +431,24 @@ ZED sensor 토픽과 호환되도록 설정됨.
 |------|------|
 | curr_depth + curr_points 사용 | **코드**: `frame_processor.cpp` L41-43, L94. **논리**: prev_depth는 ros2에서 별도 콜백으로 오며 NaN/미동기화 가능. curr_depth는 processImages 시 rgb와 함께 전달되므로 동기화·유효성 보장. |
 
-### 포즈 누적 T_global
+### 포즈 누적 T_global (구: 역변환 방식 → 2026-03-11 ZED 방식으로 변경)
 
 | 수정 | 근거 |
 |------|------|
-| T_global = T_global * T_prev_curr | **코드**: `vo_node.cpp` processImages. **논리**: PnP는 curr→prev (R_cp, t_cp). prev→curr: R_pc=R_cp^T, t_pc=-R_pc*t_cp. T_global = T_0_to_1 * T_1_to_2 * ... 누적. **단위**: objectPoints가 mm(ZED)이므로 t도 mm → 로그 시 /1000으로 m 변환. |
+| T_global = T_global * T_cp (T_prev_from_curr) | **코드**: `vo_node.cpp` L617-620. **논리**: solvePnP = T_prev_from_curr. ZED wrapper와 동일하게 직접 사용. **단위**: mm → /1000으로 m. |
 
-### 좌표계 변환 (X↔Y 스왑, Z 반전, 부호 반전)
+### 좌표계 (optical→body, camera_link + static)
+
+| 항목 | 근거 |
+|------|------|
+| odom→camera_link | body frame pose. R_opt_to_body로 변환. TF는 R_odom_from_camera_link 발행. |
+| camera_link→camera_optical_frame | static TF (0,0,0, R_opt_to_body). REP 103 표준. |
+| pose | t_curr_in_0 직접 사용, t_body=R_opt_to_body*t_opt. R_body similarity 변환 후 R_tf=R_body.t() 발행. |
+
+### 포즈 누적 T_prev_from_curr (2026-03-11)
 
 | 수정 | 근거 |
 |------|------|
-| R_cam_to_ros + S_xy 스왑 + pose_x/y/yaw 부호 반전 | **관측**: TF에서 X/Y 뒤바뀜, Z 역수, x/y/yaw 부호 반전. **수정**: R_cam_to_ros, S_xy*R*S_xy^T, pose_x=-t_y, pose_y=-t_x, pose_yaw=-atan2. |
+| T_prev_from_curr 직접 사용 (역변환 제거) | **코드**: `vo_node.cpp` L617-620. **참고**: ZED wrapper `mOdom2BaseTransf = mOdom2BaseTransf * deltaOdomTf`. solvePnP(curr_3d, prev_2d) = T_prev_from_curr. |
+| R_body similarity 변환 | **코드**: `vo_node.cpp` L639-640. **논리**: R_0_from_curr는 optical. body 프레임으로 변환 시 정지 시 I 필요. R_body = R_opt_to_body * R_0_from_curr.t() * R_opt_to_body.t(). |
+| R_tf = R_body.t() | **코드**: `vo_node.cpp` L641-643. **논리**: TF는 p_odom = R_odom_from_camera_link * p_camera_link. R_body = R_camera_link_from_odom이므로 역행렬 발행. |

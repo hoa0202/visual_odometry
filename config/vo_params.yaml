@@ -27,14 +27,18 @@
 
     # IMU (zed_sdk 모드, ZED2/ZED Mini만)
     imu:
-      enable: true  # IMU 발행 활성화
-      fusion_mode: "complementary"  # "none" | "complementary" | "ekf" | "factor_graph"
+      enable: false  # IMU 발행 활성화
+      fusion_mode: "none"  # "none" | "complementary" | "ekf" | "factor_graph"
       complementary_alpha: 0.98  # complementary filter: gyro trust (0.95~0.99)
+      ekf:
+        chi2_threshold: 16.8   # χ²(6, 0.99), innovation gate
+        huber_pos_m: 0.1        # position innovation clip (m)
+        huber_rot_rad: 0.1      # rotation innovation clip (rad)
 
-    # Frame IDs (PoseStamped, VOState, TF)
+    # Frame IDs: odom→camera_link (body), camera_link→camera_optical_frame (static)
     frames:
-      frame_id: "odom"                 # PoseStamped/VOState header, TF parent
-      child_frame_id: "camera_link"   # TF child (RViz 시각화)
+      frame_id: "odom"
+      child_frame_id: "camera_link"
     tf:
       publish: true                    # TF 발행 여부
 

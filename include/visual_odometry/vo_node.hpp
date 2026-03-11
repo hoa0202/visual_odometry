@@ -17,6 +17,7 @@
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 #include <tf2_ros/transform_broadcaster.h>
+#include <tf2_ros/static_transform_broadcaster.h>
 #include "visual_odometry/msg/vo_state.hpp"
 #include <chrono>
 #include <future>  // std::async를 위해 추가
@@ -67,6 +68,7 @@ private:
     rclcpp::Publisher<visual_odometry::msg::VOState>::SharedPtr vo_state_pub_;
     rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr imu_pub_;
     std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
+    std::unique_ptr<tf2_ros::StaticTransformBroadcaster> static_tf_broadcaster_;
 
     // 파라미터 콜백 핸들
     OnSetParametersCallbackHandle::SharedPtr param_callback_handle_;
@@ -158,6 +160,7 @@ private:
 
     // 결과 발행 함수 선언
     void publishResults(const ProcessingMetrics& metrics);
+    void publishStaticTransform();  // camera_link → camera_optical_frame
 
     // 특징점 검출 파라미터
     int max_features_{500};
