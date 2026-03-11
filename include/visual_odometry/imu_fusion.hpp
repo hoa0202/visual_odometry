@@ -6,6 +6,13 @@
 
 namespace vo {
 
+/** EKF robust params (Chi-squared gating + Huber) - VINS/ORB-SLAM 계열 표준 */
+struct EKFParams {
+    double chi2_threshold{16.8};   // χ²(6, 0.99) ≈ 16.8
+    double huber_pos_m{0.1};       // position innovation clip (m)
+    double huber_rot_rad{0.1};     // rotation innovation clip (rad)
+};
+
 /** IMU raw data (ROS convention: rad/s, m/s²). Must be in same frame as VO pose (ROS body). */
 struct ImuData {
     double ang_vel_x{0.0}, ang_vel_y{0.0}, ang_vel_z{0.0};  // rad/s
@@ -87,24 +94,6 @@ private:
     double roll_{0.0}, pitch_{0.0};
 };
 
-/** EKF 15-state: prediction from IMU, update from VO (stub: returns VO) */
-class ImuFusionEKF : public ImuFusionBase {
-public:
-    PoseOutput fuse(const PoseInput& vo_pose, const ImuData& imu, double dt_sec) override {
-        (void)imu;
-        (void)dt_sec;
-        PoseOutput out;
-        out.x = vo_pose.x;
-        out.y = vo_pose.y;
-        out.z = vo_pose.z;
-        out.roll = vo_pose.roll;
-        out.pitch = vo_pose.pitch;
-        out.yaw = vo_pose.yaw;
-        return out;  // TODO: EKF implementation
-    }
-    void reset() override {}
-};
-
 /** Factor graph + IMU preintegration (stub: returns VO) */
 class ImuFusionFactorGraph : public ImuFusionBase {
 public:
@@ -123,18 +112,8 @@ public:
     void reset() override {}
 };
 
-/** Factory */
-inline std::unique_ptr<ImuFusionBase> createImuFusion(const std::string& mode, double alpha = 0.98) {
-    if (mode == "complementary") {
-        return std::make_unique<ComplementaryFilter>(alpha);
-    }
-    if (mode == "ekf") {
-        return std::make_unique<ImuFusionEKF>();
-    }
-    if (mode == "factor_graph") {
-        return std::make_unique<ImuFusionFactorGraph>();
-    }
-    return nullptr;
-}
+std::unique_ptr<ImuFusionBase> createImuFusion(const std::string& mode, double alpha = 0.98);
+std::unique_ptr<ImuFusionBase> createImuFusion(const std::string& mode, double alpha,
+                                               const EKFParams& ekf_params);
 
 }  // namespace vo
