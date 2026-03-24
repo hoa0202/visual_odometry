@@ -116,6 +116,8 @@ public:
     explicit ImuFusionFactorGraph(size_t window_size = 20);
     ~ImuFusionFactorGraph() override;
     PoseOutput fuse(const PoseInput& vo_pose, const ImuData& imu, double dt_sec) override;
+    PoseOutput fuse(const PoseInput& vo_pose, const ImuData& imu, double dt_sec,
+                    const std::vector<ImuData>& imu_samples) override;
     void reset() override;
 
 private:

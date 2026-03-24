@@ -2,8 +2,18 @@
 
 #include "visual_odometry/imu_fusion.hpp"
 #include <cstddef>
+#include <vector>
 
 namespace vo {
+
+/** IMU preintegration 노이즈 파라미터 (ZED 2i BMI088 기본값) */
+struct ImuPreintegrationParams {
+    double accel_noise_sigma{0.05};       // m/s²/√Hz
+    double gyro_noise_sigma{0.005};       // rad/s/√Hz
+    double accel_bias_rw_sigma{0.001};    // m/s³/√Hz (bias random walk)
+    double gyro_bias_rw_sigma{0.0001};    // rad/s²/√Hz
+    double gravity{9.81};                 // m/s² (Z-up, ROS convention)
+};
 
 /** 6-DOF relative pose (x,y,z m; roll,pitch,yaw rad). GTSAM Between(i,j) expects T_i_from_j. */
 struct DeltaPose {
@@ -38,6 +48,18 @@ public:
 
     /** Phase 2.5 검증: 3 pose + 2 edge → optimize → pose 로그. 성공 시 true. */
     static bool runVerification();
+
+    /** IMU preintegration 초기화 (Phase 2) */
+    void initImuPreintegration(const ImuPreintegrationParams& imu_params);
+
+    /** IMU 샘플 preintegrate. 프레임 간 IMU 버퍼를 전달. */
+    void preintegrateImu(const std::vector<ImuData>& imu_samples);
+
+    /** preintegration 결과 로그 (delta_p, delta_v, delta_R, dt) */
+    void logPreintegration() const;
+
+    /** preintegration 초기화 여부 */
+    bool isImuReady() const;
 
     /** prev→curr 상대 pose (T_curr_from_prev). addOdometryFactor에는 T_prev_from_curr 필요. */
     static DeltaPose computeDelta(const PoseOutput& prev, const PoseOutput& curr);

@@ -23,6 +23,11 @@ struct ImuFusionFactorGraph::Impl {
 ImuFusionFactorGraph::ImuFusionFactorGraph(size_t window_size)
     : impl_(std::make_unique<Impl>()) {
     impl_->backend.setWindowSize(window_size);
+    // Phase 2: IMU preintegration 초기화 (기본 노이즈 파라미터)
+    ImuPreintegrationParams imu_params;
+    impl_->backend.initImuPreintegration(imu_params);
+    RCLCPP_INFO(logger(), "IMU preintegration initialized (acc_sigma=%.3f gyro_sigma=%.4f)",
+        imu_params.accel_noise_sigma, imu_params.gyro_noise_sigma);
 }
 
 ImuFusionFactorGraph::~ImuFusionFactorGraph() = default;
@@ -92,6 +97,18 @@ PoseOutput ImuFusionFactorGraph::fuse(const PoseInput& vo_pose,
     impl_->prev_pose = result;
     impl_->has_prev = true;
     return result;
+}
+
+PoseOutput ImuFusionFactorGraph::fuse(const PoseInput& vo_pose, const ImuData& imu,
+                                      double dt_sec,
+                                      const std::vector<ImuData>& imu_samples) {
+    // Phase 2: preintegrate IMU 샘플 + 로그 (factor graph에는 아직 적용 안 함)
+    if (!imu_samples.empty() && impl_->backend.isImuReady()) {
+        impl_->backend.preintegrateImu(imu_samples);
+        impl_->backend.logPreintegration();
+    }
+    // 기존 VO-only factor graph 로직
+    return fuse(vo_pose, imu, dt_sec);
 }
 
 void ImuFusionFactorGraph::reset() {

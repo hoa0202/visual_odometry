@@ -8,6 +8,9 @@
 #include <gtsam/nonlinear/LevenbergMarquardtOptimizer.h>
 #include <gtsam/inference/Symbol.h>
 #include <gtsam/linear/NoiseModel.h>
+#include <gtsam/navigation/CombinedImuFactor.h>
+#include <gtsam/navigation/ImuBias.h>
+#include <rclcpp/rclcpp.hpp>
 
 namespace vo {
 
@@ -66,6 +69,11 @@ struct FactorGraphBackend::Impl {
     gtsam::SharedNoiseModel between_noise;
     size_t next_idx{0};
     size_t window_size{20};  // 0 = unlimited
+
+    // IMU preintegration (Phase 2)
+    boost::shared_ptr<gtsam::PreintegrationCombinedParams> imu_params;
+    std::unique_ptr<gtsam::PreintegratedCombinedMeasurements> pim;
+    bool imu_ready{false};
 
     Impl() {
         prior_noise = gtsam::noiseModel::Diagonal::Sigmas(
@@ -172,6 +180,62 @@ PoseOutput FactorGraphBackend::optimize() {
         fromPose3(result.at<gtsam::Pose3>(last_key), out);
     }
     return out;
+}
+
+void FactorGraphBackend::initImuPreintegration(const ImuPreintegrationParams& p) {
+    // Z-up (ROS REP 103): gravity = (0, 0, -g)
+    impl_->imu_params = gtsam::PreintegrationCombinedParams::MakeSharedU(p.gravity);
+    auto& ip = impl_->imu_params;
+    ip->setAccelerometerCovariance(gtsam::I_3x3 * std::pow(p.accel_noise_sigma, 2));
+    ip->setGyroscopeCovariance(gtsam::I_3x3 * std::pow(p.gyro_noise_sigma, 2));
+    ip->setIntegrationCovariance(gtsam::I_3x3 * 1e-8);
+    ip->setBiasAccCovariance(gtsam::I_3x3 * std::pow(p.accel_bias_rw_sigma, 2));
+    ip->setBiasOmegaCovariance(gtsam::I_3x3 * std::pow(p.gyro_bias_rw_sigma, 2));
+    ip->setBiasAccOmegaInit(gtsam::I_6x6 * 1e-5);
+
+    gtsam::imuBias::ConstantBias zero_bias;
+    impl_->pim = std::make_unique<gtsam::PreintegratedCombinedMeasurements>(ip, zero_bias);
+    impl_->imu_ready = true;
+}
+
+void FactorGraphBackend::preintegrateImu(const std::vector<ImuData>& imu_samples) {
+    if (!impl_->imu_ready || !impl_->pim) return;
+    impl_->pim->resetIntegration();
+    for (size_t i = 0; i < imu_samples.size(); ++i) {
+        const auto& s = imu_samples[i];
+        gtsam::Vector3 acc(s.lin_acc_x, s.lin_acc_y, s.lin_acc_z);
+        gtsam::Vector3 gyro(s.ang_vel_x, s.ang_vel_y, s.ang_vel_z);
+        double dt;
+        if (i + 1 < imu_samples.size()) {
+            dt = imu_samples[i + 1].timestamp - s.timestamp;
+        } else if (i > 0) {
+            dt = s.timestamp - imu_samples[i - 1].timestamp;
+        } else {
+            dt = 0.005;  // 200Hz default
+        }
+        if (dt <= 0.0 || dt > 0.1) dt = 0.005;
+        impl_->pim->integrateMeasurement(acc, gyro, dt);
+    }
+}
+
+void FactorGraphBackend::logPreintegration() const {
+    if (!impl_->imu_ready || !impl_->pim) return;
+    auto logger = rclcpp::get_logger("factor_graph");
+    static auto clock = std::make_shared<rclcpp::Clock>(RCL_STEADY_TIME);
+    const auto& pim = *impl_->pim;
+    gtsam::Vector3 dp = pim.deltaPij();
+    gtsam::Vector3 dv = pim.deltaVij();
+    gtsam::Vector3 rpy = pim.deltaRij().rpy();
+    RCLCPP_INFO_THROTTLE(logger, *clock, 5000,
+        "IMU preint: dt=%.3f dp=(%.4f,%.4f,%.4f) dv=(%.4f,%.4f,%.4f) rpy=(%.2f,%.2f,%.2f)deg",
+        pim.deltaTij(),
+        dp.x(), dp.y(), dp.z(),
+        dv.x(), dv.y(), dv.z(),
+        rpy.x() * 180.0 / M_PI, rpy.y() * 180.0 / M_PI, rpy.z() * 180.0 / M_PI);
+}
+
+bool FactorGraphBackend::isImuReady() const {
+    return impl_->imu_ready;
 }
 
 void FactorGraphBackend::reset() {

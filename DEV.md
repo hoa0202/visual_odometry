@@ -321,6 +321,18 @@ ZED sensor 토픽과 호환되도록 설정됨.
 
 ## 10. 변경 이력 (Changelog)
 
+### 2026-03-24 — Phase 2: GTSAM IMU Preintegration 설정
+
+- **PreintegrationCombinedParams**: ZED 2i BMI088 IMU 기본 노이즈 파라미터 설정
+  - `accel_noise_sigma=0.05 m/s²/√Hz`, `gyro_noise_sigma=0.005 rad/s/√Hz`
+  - `accel_bias_rw=0.001`, `gyro_bias_rw=0.0001`, gravity=9.81 (Z-up)
+- **PreintegratedCombinedMeasurements**: 프레임 간 IMU 샘플 → `integrateMeasurement(acc, gyro, dt)` 호출
+- **dt 계산**: 연속 IMU 샘플 timestamp 차이 사용. 비정상(≤0 또는 >100ms) 시 5ms fallback
+- **검증 로그**: `IMU preint: dt=... dp=(...) dv=(...) rpy=(...)deg` 매 프레임 출력
+- **Phase 2 범위**: preintegration 계산만 수행, factor graph에 IMU factor 추가는 Phase 3
+- **ImuFusionFactorGraph**: vector fuse() 오버로드에서 preintegrateImu() + logPreintegration() 호출
+- **수정 파일**: `factor_graph.hpp`, `factor_graph.cpp`, `imu_fusion.hpp`, `imu_fusion_factor_graph.cpp`
+
 ### 2026-03-24 — IMU 고빈도 폴링 타이머 (200Hz)
 
 - **문제**: ZED SDK `getSensorsData(TIME_REFERENCE::IMAGE)`는 이미지 동기화 IMU 1개만 반환 → 프레임당 0~2개 샘플 (preintegration에 부족)
@@ -457,10 +469,10 @@ ZED sensor 토픽과 호환되도록 설정됨.
    - [x] 1.5.3 `getImages()`에서 IMU 분리 (이미지/IMU 독립 획득)
    - [x] 1.5.4 검증: `IMU buffer: N samples drained` N ≈ 5~7 (실측 평균 6)
 
-   **Phase 2: GTSAM IMU preintegration 설정**
-   - [ ] 2.1 `PreintegratedCombinedMeasurements` 파라미터 (acc/gyro noise, bias)
-   - [ ] 2.2 IMU preintegration 함수: `vector<ImuData>` → `PreintegratedCombinedMeasurements`
-   - [ ] 2.3 검증: preintegration 값 로그 (delta_p, delta_v, delta_R)
+   **Phase 2: GTSAM IMU preintegration 설정** 🔧 검증 중
+   - [x] 2.1 `PreintegrationCombinedParams` 파라미터 (acc/gyro noise, bias RW, gravity)
+   - [x] 2.2 `preintegrateImu()`: `vector<ImuData>` → `PreintegratedCombinedMeasurements`
+   - [ ] 2.3 검증: `IMU preint: dt=... dp=(...) dv=(...) rpy=(...)deg` 로그 확인
 
    **Phase 3: Factor graph IMU factor 통합**
    - [ ] 3.1 velocity/bias 노드 추가 (NavState)
