@@ -380,6 +380,11 @@ ZED sensor 토픽과 호환되도록 설정됨.
 - **TF 규약 수정**: odom→camera_link는 child→parent 변환. R_odom_from_camera_link = R_body.t() 발행. 회전 역방향 문제 해결.
 - **yaw 추출**: tf2 getRPY와 동일하게 atan2(R(1,0), R(0,0)) 사용 (부호 반전 제거).
 
+### 2026-03-24
+
+- **IMU-VO Adaptive Noise (보조 수단)**: `computeImuVoConsistency()` — IMU delta vs VO delta 비교, 불일치 시 noise_scale 최대 10x. 기본 between_noise 상향 (0.05/0.1 → 0.08/0.15). 단, factor-level 조절만으로는 불충분 — feature-level outlier rejection이 표준 접근 (ORB-SLAM3/VINS 분석 결과).
+- **로드맵 재구성**: 동적 물체 대응을 ORB-SLAM3/VINS-Mono 표준 기준으로 5-Phase 재설계. Layer 1(RANSAC inlier ratio) → Layer 2(재투영 에러 필터) → Layer 3(Huber kernel) → Layer 4(multi-view) → Layer 5(semantic mask).
+
 ### 2026-03-10
 
 - **Factor Graph 버그 수정**: GTSAM Between(i,j) measured=T_i_from_j. odom_delta를 T_prev_from_curr로 수정 (기존 T_curr_from_prev 잘못 전달로 발산).
@@ -498,15 +503,71 @@ ZED sensor 토픽과 호환되도록 설정됨.
    - [ ] 4.2 동적 장면 드리프트 비교
    - [ ] 4.3 노이즈 파라미터 튜닝 (acc/gyro sigma)
 
-   **Phase 5: DEV.md 업데이트**
-   - [ ] 5.1 각 Phase 결과 기록
+   **Phase 5: IMU-VO Adaptive Noise** ✅ 구현 (보조 수단)
+   - [x] 5.1 `computeImuVoConsistency()`: IMU delta vs VO delta 비교 → noise_scale 반환
+   - [x] 5.2 `addOdometryFactor()`: noise_scale 파라미터, inflate 적용
+   - [x] 5.3 기본 between_noise 상향 (0.08/0.15)
+   - ⚠️ **한계**: factor-level noise 조절은 보조 수단. 단독으로는 불충분 (아래 §4 참조)
 
-4. **실험·평가** (병행)
+4. **동적 물체 Robust 대응** (ORB-SLAM3/VINS-Mono 표준 접근)
+
+   > **배경**: 대표 VIO/SLAM 시스템(ORB-SLAM3, VINS-Mono, RTAB-Map)은 전부
+   > **feature 단위 outlier rejection**이 동적 물체 대응의 핵심 방어선.
+   > factor graph noise 조절(현재 Phase 5)은 PnP 결과가 이미 오염된 뒤의
+   > 후처리이므로, 올바른 VO 정보까지 같이 버리는 부작용이 있음.
+   >
+   > **올바른 방어 계층 (대표 SLAM 기준)**:
+   > ```
+   > Layer 1: Feature-level (RANSAC + 재투영 에러)  ← 핵심, 가성비 최고
+   > Layer 2: Robust kernel (Huber/Cauchy on factor) ← 간단, 효과적
+   > Layer 3: Factor-level noise (IMU-VO consistency) ← 보조 (현재 구현)
+   > Layer 4: Semantic masking (사람/차량 영역 제외)  ← 고급, GPU 필요
+   > ```
+
+   **Phase 1: RANSAC inlier ratio 기반 VO 신뢰도** (ORB-SLAM3 핵심)
+   - [ ] 1.1 PnP 결과에서 `inlier_ratio = inliers / total_matches` 계산
+   - [ ] 1.2 `PoseInput`에 `vo_confidence` 필드 추가 (0.0~1.0)
+   - [ ] 1.3 `inlier_ratio < 0.5` → noise_scale 증가, `< 0.3` → VO 폐기 (IMU only)
+   - [ ] 1.4 기존 `computeImuVoConsistency()`와 합산 (max)
+   - [ ] 1.5 검증: 물체 이동 시 `low inlier ratio` 로그 + VO 영향 감소 확인
+
+   **Phase 2: PnP 후 재투영 에러 필터** (ORB-SLAM3/VINS 표준)
+   - [ ] 2.1 PnP 결과 R,t로 모든 3D점 재투영 (`cv::projectPoints`)
+   - [ ] 2.2 재투영 에러 > threshold (e.g. 3px)인 점 제거
+   - [ ] 2.3 남은 inlier로 PnP 재계산 (2차 refinement)
+   - [ ] 2.4 검증: 재투영 에러 분포 로그, 동적 물체 점 제거율
+
+   **Phase 3: Huber robust kernel on BetweenFactor** (간단, 효과적)
+   - [ ] 3.1 `addOdometryFactor()`에서 `noiseModel::Robust::Create(Huber, noise)` 적용
+   - [ ] 3.2 Huber delta 파라미터 튜닝 (기본 0.5)
+   - [ ] 3.3 검증: outlier 프레임의 factor 영향 감소 확인
+
+   **Phase 4: Multi-view consistency** (중급, 선택)
+   - [ ] 4.1 N 프레임 이상 추적된 feature만 PnP에 사용
+   - [ ] 4.2 짧게 나타났다 사라지는 feature (동적 물체) 자동 필터
+
+   **Phase 5: Semantic masking** (고급, 후순위)
+   - [ ] 5.1 경량 segmentation (MobileNet/YOLO)으로 사람/차량 마스크
+   - [ ] 5.2 마스크 영역 feature 추출 제외
+   - [ ] 5.3 DynaSLAM/DS-SLAM 계열 접근
+
+   > **비교표: 대표 시스템 vs 우리 시스템**
+   > | 방어 계층 | ORB-SLAM3 | VINS-Mono | RTAB-Map | 우리 |
+   > |-----------|-----------|-----------|----------|------|
+   > | RANSAC PnP | ✅ | ✅ | ✅ | ✅ |
+   > | Inlier ratio 체크 | ✅ | ✅ (fundamental) | ✅ | ❌→Phase 1 |
+   > | 재투영 에러 필터 | ✅ (BA 내) | ✅ (chi²) | ✅ | ❌→Phase 2 |
+   > | Robust kernel | ✅ (Huber) | ❌ | ❌ | ❌→Phase 3 |
+   > | Factor noise 조절 | ❌ | ❌ | ❌ | ✅ (보조) |
+   > | Semantic mask | ❌ | ❌ | ❌ | ❌→Phase 5 |
+
+5. **실험·평가** (병행)
    - [ ] 데이터셋 수집 또는 TUM/EuRoC
    - [ ] ATE, RPE, 처리 속도 측정
    - [ ] §12 논문용 메모 기록
 
 ### 선택 (후순위)
+- [ ] 루프 클로저
 - [ ] 3DGS/NeRF SLAM 연구 추적
 - [ ] 스케일 보정, 번들 조정
 

@@ -19,6 +19,7 @@ struct ImuFusionFactorGraph::Impl {
     PoseOutput prev_pose;
     bool has_prev{false};
     bool imu_preintegrated{false};  // 현재 프레임에서 preintegration 완료 여부
+    bool is_zero_motion{false};     // Phase 4: IMU 기반 정지 감지
 };
 
 ImuFusionFactorGraph::ImuFusionFactorGraph(size_t window_size)
@@ -70,12 +71,19 @@ PoseOutput ImuFusionFactorGraph::fuse(const PoseInput& vo_pose,
         } else {
             delta = FactorGraphBackend::computeDelta(impl_->prev_pose, curr);
         }
-        impl_->backend.addOdometryFactor(idx - 1, idx, delta);
+        // Phase 5: IMU-VO consistency → adaptive noise
+        double noise_scale = impl_->backend.computeImuVoConsistency(delta);
+        impl_->backend.addOdometryFactor(idx - 1, idx, delta, noise_scale);
 
         // Phase 3: preintegration 완료 시 CombinedImuFactor 추가
         if (impl_->imu_preintegrated) {
             impl_->backend.addImuFactor(idx - 1, idx, dt_sec);
             impl_->imu_preintegrated = false;
+        }
+
+        // Phase 4: ZUPT — IMU가 정지 감지 시 강한 zero-velocity + identity 제약
+        if (impl_->is_zero_motion) {
+            impl_->backend.addZeroVelocityConstraint(idx);
         }
     }
 
@@ -101,6 +109,14 @@ PoseOutput ImuFusionFactorGraph::fuse(const PoseInput& vo_pose,
             "factor_graph fallback to VO: %s pos_diff=%.3f rot_diff=%.3f rad (poses=%zu)",
             has_nan ? "NaN" : "diverged", pos_diff, rot_diff, impl_->backend.getNextIndex());
         result = curr;
+        // 심각한 발산 시 factor graph 리셋 (velocity 폭주 방지)
+        if (pos_diff > 5.0 || has_nan) {
+            RCLCPP_WARN(logger(), "factor_graph RESET: severe divergence (pos_diff=%.1f)", pos_diff);
+            impl_->backend.reset();
+            impl_->has_prev = false;
+            impl_->prev_pose = curr;
+            return result;
+        }
     } else {
         RCLCPP_INFO_THROTTLE(logger(), *throttle_clock(), 5000,
             "factor_graph OK: poses=%zu pos_diff=%.4f rot_diff=%.4f rad",
@@ -118,8 +134,10 @@ PoseOutput ImuFusionFactorGraph::fuse(const PoseInput& vo_pose, const ImuData& i
     if (!imu_samples.empty() && impl_->backend.isImuReady()) {
         impl_->backend.preintegrateImu(imu_samples);
         impl_->backend.logPreintegration();
-        impl_->imu_preintegrated = true;  // fuse()에서 addImuFactor 호출 트리거
+        impl_->imu_preintegrated = true;
     }
+    // Phase 4: IMU 기반 정지 감지 (ZUPT)
+    impl_->is_zero_motion = FactorGraphBackend::detectZeroMotion(imu_samples);
     return fuse(vo_pose, imu, dt_sec);
 }
 

@@ -37,8 +37,14 @@ public:
     void addPose(size_t i, double x, double y, double z,
                  double roll, double pitch, double yaw);
 
-    /** odometry factor: Between(i,j), measured = T_i_from_j (delta_pose) */
-    void addOdometryFactor(size_t i, size_t j, const DeltaPose& delta_pose);
+    /** odometry factor: Between(i,j), measured = T_i_from_j (delta_pose).
+     *  noise_scale > 1.0 → VO를 덜 신뢰 (IMU-VO 불일치 시 inflate). */
+    void addOdometryFactor(size_t i, size_t j, const DeltaPose& delta_pose,
+                           double noise_scale = 1.0);
+
+    /** IMU preintegration delta와 VO delta의 consistency score 계산.
+     *  반환: noise_scale (1.0=일치, 최대 10.0=심한 불일치). */
+    double computeImuVoConsistency(const DeltaPose& vo_delta) const;
 
     /** 최적화 후 최신 pose 반환. pose가 없으면 identity. */
     PoseOutput optimize();
@@ -68,6 +74,17 @@ public:
 
     /** Phase 3: velocity/bias 초기값 설정 (i=0 prior용) */
     void addVelocityBiasPrior(size_t i);
+
+    /** Phase 4: Zero-Velocity Update (ZUPT).
+     *  IMU 기반 정지 감지 시 호출. zero-velocity prior + identity BetweenFactor 추가.
+     *  VO 드리프트를 IMU로 억제. */
+    void addZeroVelocityConstraint(size_t i);
+
+    /** IMU 샘플로 정지 상태 판별.
+     *  gyro < threshold && accel ≈ gravity → true. */
+    static bool detectZeroMotion(const std::vector<ImuData>& imu_samples,
+                                  double gyro_threshold = 0.05,
+                                  double accel_var_threshold = 0.15);
 
     /** prev→curr 상대 pose (T_curr_from_prev). addOdometryFactor에는 T_prev_from_curr 필요. */
     static DeltaPose computeDelta(const PoseOutput& prev, const PoseOutput& curr);

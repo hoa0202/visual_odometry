@@ -85,8 +85,9 @@ struct FactorGraphBackend::Impl {
     Impl() {
         prior_noise = gtsam::noiseModel::Diagonal::Sigmas(
             (gtsam::Vector(6) << 0.01, 0.01, 0.01, 0.05, 0.05, 0.05).finished());
+        // Phase 5: 기본 VO noise 상향 (IMU 상대적으로 더 신뢰)
         between_noise = gtsam::noiseModel::Diagonal::Sigmas(
-            (gtsam::Vector(6) << 0.05, 0.05, 0.05, 0.1, 0.1, 0.1).finished());
+            (gtsam::Vector(6) << 0.08, 0.08, 0.08, 0.15, 0.15, 0.15).finished());
         // velocity prior: 정지 시작 가정, 넉넉한 sigma
         vel_prior_noise = gtsam::noiseModel::Isotropic::Sigma(3, 0.5);  // m/s
         // bias prior: zero bias 가정, 넉넉한 sigma
@@ -121,14 +122,69 @@ void FactorGraphBackend::addPose(size_t i, double x, double y, double z,
 }
 
 void FactorGraphBackend::addOdometryFactor(size_t i, size_t j,
-                                           const DeltaPose& delta_pose) {
+                                           const DeltaPose& delta_pose,
+                                           double noise_scale) {
     gtsam::Key key_i = gtsam::Symbol('x', static_cast<gtsam::Key>(i));
     gtsam::Key key_j = gtsam::Symbol('x', static_cast<gtsam::Key>(j));
     gtsam::Pose3 measured = toPose3(
         delta_pose.x, delta_pose.y, delta_pose.z,
         delta_pose.roll, delta_pose.pitch, delta_pose.yaw);
+
+    gtsam::SharedNoiseModel noise = impl_->between_noise;
+    if (noise_scale > 1.01) {
+        // VO noise inflate: IMU-VO 불일치 → VO 덜 신뢰
+        noise = gtsam::noiseModel::Diagonal::Sigmas(
+            (gtsam::Vector(6) << 0.08 * noise_scale, 0.08 * noise_scale, 0.08 * noise_scale,
+                                 0.15 * noise_scale, 0.15 * noise_scale, 0.15 * noise_scale).finished());
+    }
+
     impl_->graph.add(gtsam::BetweenFactor<gtsam::Pose3>(
-        key_i, key_j, measured, impl_->between_noise));
+        key_i, key_j, measured, noise));
+}
+
+double FactorGraphBackend::computeImuVoConsistency(const DeltaPose& vo_delta) const {
+    if (!impl_->imu_ready || !impl_->pim || impl_->pim->deltaTij() < 1e-6) {
+        return 1.0;  // IMU 없으면 기본 noise
+    }
+
+    // IMU preintegration으로 예측한 delta position
+    gtsam::NavState prev_state(
+        gtsam::Pose3(),  // identity (상대 delta이므로)
+        impl_->prev_velocity);
+    gtsam::NavState predicted = impl_->pim->predict(prev_state, impl_->prev_bias);
+    gtsam::Vector3 imu_dp = predicted.pose().translation();
+    gtsam::Vector3 imu_dr = predicted.pose().rotation().rpy();
+
+    // VO delta
+    double vo_pos_norm = std::sqrt(vo_delta.x * vo_delta.x +
+                                    vo_delta.y * vo_delta.y +
+                                    vo_delta.z * vo_delta.z);
+    double imu_pos_norm = imu_dp.norm();
+
+    // 위치 불일치: VO가 IMU보다 훨씬 크게 움직인다고 판단 → 움직이는 물체 오염
+    double pos_diff = std::abs(vo_pos_norm - imu_pos_norm);
+    // 회전 불일치
+    double rot_diff = std::sqrt(
+        (vo_delta.roll - imu_dr(0)) * (vo_delta.roll - imu_dr(0)) +
+        (vo_delta.pitch - imu_dr(1)) * (vo_delta.pitch - imu_dr(1)) +
+        (vo_delta.yaw - imu_dr(2)) * (vo_delta.yaw - imu_dr(2)));
+
+    // noise_scale: 불일치에 비례 (최소 1.0, 최대 10.0)
+    // pos_diff > 0.05m 또는 rot_diff > 0.1rad 부터 inflate 시작
+    double pos_score = std::max(0.0, (pos_diff - 0.05) / 0.1);  // 0.05m 데드존, 0.1m당 1x
+    double rot_score = std::max(0.0, (rot_diff - 0.1) / 0.2);   // 0.1rad 데드존, 0.2rad당 1x
+    double score = 1.0 + std::max(pos_score, rot_score) * 3.0;
+    score = std::min(score, 10.0);
+
+    if (score > 1.5) {
+        auto logger = rclcpp::get_logger("factor_graph");
+        static auto clock = std::make_shared<rclcpp::Clock>(RCL_STEADY_TIME);
+        RCLCPP_WARN_THROTTLE(logger, *clock, 2000,
+            "IMU-VO inconsistency: vo_pos=%.4f imu_pos=%.4f rot_diff=%.3f → noise_scale=%.1f",
+            vo_pos_norm, imu_pos_norm, rot_diff, score);
+    }
+
+    return score;
 }
 
 PoseOutput FactorGraphBackend::optimize() {
@@ -218,6 +274,12 @@ PoseOutput FactorGraphBackend::optimize() {
     gtsam::Key last_bias = gtsam::Symbol('b', static_cast<gtsam::Key>(last_idx));
     if (result.exists(last_vel)) {
         impl_->prev_velocity = result.at<gtsam::Vector3>(last_vel);
+        // velocity clamp: 폭주 방지
+        static constexpr double kMaxVel = 3.0;
+        for (int a = 0; a < 3; ++a) {
+            impl_->prev_velocity(a) = std::max(-kMaxVel,
+                std::min(kMaxVel, impl_->prev_velocity(a)));
+        }
     }
     if (result.exists(last_bias)) {
         impl_->prev_bias = result.at<gtsam::imuBias::ConstantBias>(last_bias);
@@ -323,14 +385,24 @@ void FactorGraphBackend::addImuFactor(size_t i, size_t j, double dt_sec) {
     impl_->graph.add(gtsam::CombinedImuFactor(
         pose_i, vel_i, pose_j, vel_j, bias_i, bias_j, *impl_->pim));
 
-    // velocity 초기값: PIM predict from previous velocity
+    // velocity 초기값: PIM predict from previous velocity (clamped)
+    static constexpr double kMaxVel = 3.0;  // m/s — 보행자 속도 상한
+    gtsam::Vector3 clamped_prev_vel = impl_->prev_velocity;
+    for (int a = 0; a < 3; ++a) {
+        clamped_prev_vel(a) = std::max(-kMaxVel, std::min(kMaxVel, clamped_prev_vel(a)));
+    }
     gtsam::NavState prev_state(
         impl_->initial.exists(pose_i) ?
             impl_->initial.at<gtsam::Pose3>(pose_i) :
             gtsam::Pose3(),
-        impl_->prev_velocity);
+        clamped_prev_vel);
     gtsam::NavState predicted = impl_->pim->predict(prev_state, impl_->prev_bias);
     gtsam::Vector3 pred_vel = predicted.velocity();
+
+    // velocity clamp: 비정상 속도 방지
+    for (int a = 0; a < 3; ++a) {
+        pred_vel(a) = std::max(-kMaxVel, std::min(kMaxVel, pred_vel(a)));
+    }
 
     // j 노드에 velocity/bias 초기값 삽입
     if (!impl_->initial.exists(vel_j)) {
@@ -348,6 +420,67 @@ void FactorGraphBackend::addImuFactor(size_t i, size_t j, double dt_sec) {
         "IMU factor added: (%zu→%zu) dt=%.3f pred_vel=(%.3f,%.3f,%.3f)",
         i, j, impl_->pim->deltaTij(),
         pred_vel.x(), pred_vel.y(), pred_vel.z());
+}
+
+void FactorGraphBackend::addZeroVelocityConstraint(size_t i) {
+    gtsam::Key vel_key = gtsam::Symbol('v', static_cast<gtsam::Key>(i));
+    gtsam::Key pose_key = gtsam::Symbol('x', static_cast<gtsam::Key>(i));
+
+    // 강한 zero-velocity prior (sigma=0.01 m/s → IMU가 정지라고 확신)
+    auto zupt_noise = gtsam::noiseModel::Isotropic::Sigma(3, 0.01);
+    gtsam::Vector3 zero_vel(0, 0, 0);
+
+    if (!impl_->initial.exists(vel_key)) {
+        impl_->initial.insert(vel_key, zero_vel);
+    }
+    impl_->graph.add(gtsam::PriorFactor<gtsam::Vector3>(
+        vel_key, zero_vel, zupt_noise));
+
+    // identity BetweenFactor: 이전 pose와 동일해야 함 (sigma 매우 작음)
+    if (i > 0) {
+        gtsam::Key prev_pose = gtsam::Symbol('x', static_cast<gtsam::Key>(i - 1));
+        auto zupt_pose_noise = gtsam::noiseModel::Diagonal::Sigmas(
+            (gtsam::Vector(6) << 0.001, 0.001, 0.001, 0.005, 0.005, 0.005).finished());
+        impl_->graph.add(gtsam::BetweenFactor<gtsam::Pose3>(
+            prev_pose, pose_key, gtsam::Pose3(), zupt_pose_noise));
+    }
+
+    auto logger = rclcpp::get_logger("factor_graph");
+    static auto clock = std::make_shared<rclcpp::Clock>(RCL_STEADY_TIME);
+    RCLCPP_INFO_THROTTLE(logger, *clock, 3000,
+        "ZUPT: zero-velocity constraint at pose %zu", i);
+}
+
+bool FactorGraphBackend::detectZeroMotion(const std::vector<ImuData>& imu_samples,
+                                           double gyro_threshold,
+                                           double accel_var_threshold) {
+    if (imu_samples.size() < 3) return false;
+
+    // gyro magnitude 평균 + accel variance 계산
+    double gyro_sum = 0.0;
+    double ax_sum = 0.0, ay_sum = 0.0, az_sum = 0.0;
+    for (const auto& s : imu_samples) {
+        gyro_sum += std::sqrt(s.ang_vel_x * s.ang_vel_x +
+                              s.ang_vel_y * s.ang_vel_y +
+                              s.ang_vel_z * s.ang_vel_z);
+        ax_sum += s.lin_acc_x;
+        ay_sum += s.lin_acc_y;
+        az_sum += s.lin_acc_z;
+    }
+    double n = static_cast<double>(imu_samples.size());
+    double gyro_avg = gyro_sum / n;
+    double ax_mean = ax_sum / n, ay_mean = ay_sum / n, az_mean = az_sum / n;
+
+    // accel variance (gravity 뺀 후가 아니라 raw에서 분산 — 정지 시 분산 작음)
+    double acc_var = 0.0;
+    for (const auto& s : imu_samples) {
+        acc_var += (s.lin_acc_x - ax_mean) * (s.lin_acc_x - ax_mean) +
+                   (s.lin_acc_y - ay_mean) * (s.lin_acc_y - ay_mean) +
+                   (s.lin_acc_z - az_mean) * (s.lin_acc_z - az_mean);
+    }
+    acc_var /= n;
+
+    return (gyro_avg < gyro_threshold) && (acc_var < accel_var_threshold);
 }
 
 void FactorGraphBackend::reset() {
