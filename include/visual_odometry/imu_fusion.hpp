@@ -3,6 +3,7 @@
 #include <cmath>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace vo {
 
@@ -21,11 +22,20 @@ struct ImuData {
     bool valid{false};
 };
 
+/** Relative pose T_curr_from_prev (for factor graph Between factor) */
+struct RelPose {
+    double x{0.0}, y{0.0}, z{0.0};
+    double roll{0.0}, pitch{0.0}, yaw{0.0};
+    bool valid{false};
+};
+
 /** VO pose input (ROS frame: x,y,z m; roll,pitch,yaw rad) */
 struct PoseInput {
     double x{0.0}, y{0.0}, z{0.0};
     double roll{0.0}, pitch{0.0}, yaw{0.0};
     bool valid{false};
+    /** PnP T_prev_from_curr in body frame (GTSAM Between measured). factor_graph만 사용. */
+    RelPose odom_delta;
 };
 
 /** Fused pose output */
@@ -39,6 +49,12 @@ class ImuFusionBase {
 public:
     virtual ~ImuFusionBase() = default;
     virtual PoseOutput fuse(const PoseInput& vo_pose, const ImuData& imu, double dt_sec) = 0;
+    /** IMU 버퍼 전달 오버로드 (factor_graph preintegration용). 기본: 단일 샘플 fallback. */
+    virtual PoseOutput fuse(const PoseInput& vo_pose, const ImuData& imu, double dt_sec,
+                            const std::vector<ImuData>& imu_samples) {
+        (void)imu_samples;
+        return fuse(vo_pose, imu, dt_sec);
+    }
     virtual void reset() = 0;
 };
 
@@ -94,26 +110,24 @@ private:
     double roll_{0.0}, pitch_{0.0};
 };
 
-/** Factor graph + IMU preintegration (stub: returns VO) */
+/** Factor graph + IMU preintegration. Phase 2~4: pose graph, sliding window. */
 class ImuFusionFactorGraph : public ImuFusionBase {
 public:
-    PoseOutput fuse(const PoseInput& vo_pose, const ImuData& imu, double dt_sec) override {
-        (void)imu;
-        (void)dt_sec;
-        PoseOutput out;
-        out.x = vo_pose.x;
-        out.y = vo_pose.y;
-        out.z = vo_pose.z;
-        out.roll = vo_pose.roll;
-        out.pitch = vo_pose.pitch;
-        out.yaw = vo_pose.yaw;
-        return out;  // TODO: Factor graph implementation
-    }
-    void reset() override {}
+    explicit ImuFusionFactorGraph(size_t window_size = 20);
+    ~ImuFusionFactorGraph() override;
+    PoseOutput fuse(const PoseInput& vo_pose, const ImuData& imu, double dt_sec) override;
+    void reset() override;
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
 };
 
 std::unique_ptr<ImuFusionBase> createImuFusion(const std::string& mode, double alpha = 0.98);
 std::unique_ptr<ImuFusionBase> createImuFusion(const std::string& mode, double alpha,
                                                const EKFParams& ekf_params);
+std::unique_ptr<ImuFusionBase> createImuFusion(const std::string& mode, double alpha,
+                                               const EKFParams& ekf_params,
+                                               size_t factor_graph_window_size);
 
 }  // namespace vo

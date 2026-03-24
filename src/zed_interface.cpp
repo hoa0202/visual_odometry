@@ -93,6 +93,11 @@ bool ZEDInterface::getImages(cv::Mat& rgb, cv::Mat& depth, sl::SensorsData* sens
     return true;
 }
 
+bool ZEDInterface::getSensorsDataCurrent(sl::SensorsData& sensors) {
+    if (!is_connected_) return false;
+    return zed_.getSensorsData(sensors, sl::TIME_REFERENCE::CURRENT) == sl::ERROR_CODE::SUCCESS;
+}
+
 bool ZEDInterface::getCameraParameters(cv::Mat& K, cv::Mat& D) {
     if (!is_connected_) return false;
 

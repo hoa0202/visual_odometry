@@ -41,6 +41,7 @@ ros2 topic echo /zed/zed_node/rgb/color/rect/image --no-arr
 | 시각화 추가 | `visualization.cpp` | `visualize()` |
 | 메시지 발행 | `vo_node.cpp` | `processImages()` 내, `publishResults()` |
 | IMU-VO fusion | `imu_fusion.hpp`, `vo_node.cpp` | fusion_mode, complementary/ekf/factor_graph |
+| Factor graph | `factor_graph.hpp`, `factor_graph.cpp`, `vo_node.cpp` | §11 Phase 2~5 |
 
 ### 디버깅 체크리스트
 
@@ -120,6 +121,7 @@ visual_odometry/
 │   ├── feature_detector.hpp
 │   ├── feature_matcher.hpp
 │   ├── frame_processor.hpp
+│   ├── factor_graph.hpp       # (예정) FactorGraphBackend
 │   ├── image_processor.hpp
 │   ├── logger.hpp
 │   ├── imu_fusion.hpp
@@ -137,6 +139,7 @@ visual_odometry/
 │   ├── feature_detector.cpp
 │   ├── feature_matcher.cpp
 │   ├── frame_processor.cpp
+│   ├── factor_graph.cpp       # (예정)
 │   ├── image_processor.cpp
 │   ├── imu_fusion_ekf.cpp
 │   ├── imu_fusion_factory.cpp
@@ -318,6 +321,33 @@ ZED sensor 토픽과 호환되도록 설정됨.
 
 ## 10. 변경 이력 (Changelog)
 
+### 2026-03-24 — IMU 고빈도 폴링 타이머 (200Hz)
+
+- **문제**: ZED SDK `getSensorsData(TIME_REFERENCE::IMAGE)`는 이미지 동기화 IMU 1개만 반환 → 프레임당 0~2개 샘플 (preintegration에 부족)
+- **해결**: `imuPollLoop()` 전용 스레드 200Hz(5ms sleep), `getSensorsData(TIME_REFERENCE::CURRENT)` 사용
+- **ROS2 타이머 → 스레드 변경 이유**: SingleThreadedExecutor에서 200Hz 타이머가 zed_timer_(60Hz)와 경쟁하여 실질 0~3개만 획득. 전용 스레드로 executor 경합 해소.
+- **ZED SDK thread-safe**: [Stereolabs 공식](https://github.com/stereolabs/zed-sdk/issues/89) — `grab()`과 `getSensorsData(CURRENT)` 병렬 호출 안전
+- **레퍼런스**: VINS-Mono/ORB-SLAM3/Kimera-VIO 모두 고빈도 IMU 독립 수집 → 프레임 간 버퍼 누적 → drain하여 preintegration. 우리 구조도 동일 패턴.
+- **getImages()에서 IMU 제거**: 이미지 획득과 IMU 획득 완전 분리.
+- **ZEDInterface 확장**: `getSensorsDataCurrent()` 메서드 추가 (`TIME_REFERENCE::CURRENT` 래핑)
+- **예상 결과**: `IMU buffer: N samples drained` N ≈ 5~7 @200Hz/~33fps VO
+- **수정 파일**: `zed_interface.hpp`, `zed_interface.cpp`, `vo_node.hpp`, `vo_node.cpp`
+
+### 2026-03-20 — IMU Preintegration Phase 1: IMU 버퍼링 인프라
+
+- **IMU 버퍼 추가**: `latest_imu_`(단일 샘플) 외에 `std::deque<ImuData> imu_buffer_` 링버퍼 추가 (최대 500개, ~1.25초 @400Hz). ZED IMU ~400Hz, VO ~30fps → 프레임당 ~13개 IMU 샘플 버퍼링.
+- **imuCallback/ZED SDK**: 두 경로 모두 `imu_buffer_.push_back()` 추가.
+- **소비 코드 drain**: fusion 직전 `imu_buffer_` → `std::vector<ImuData>` 복사 후 clear. 각 샘플에 ZED→ROS 좌표 변환 적용.
+- **fuse() 오버로드**: `ImuFusionBase`에 `fuse(PoseInput, ImuData, dt, vector<ImuData>)` 추가. 기본 구현은 단일 샘플 fallback (ComplementaryFilter/EKF 호환).
+- **검증 로그**: `IMU buffer: N samples drained` (5초 throttle). N>0이면 버퍼링 정상.
+- **수정 파일**: `vo_node.hpp`, `vo_node.cpp`, `imu_fusion.hpp`
+
+### 2026-03-20 — Factor Graph 발산 버그 수정
+
+- **Prior 노이즈 비율 수정**: prior_noise sigma `1e-6` → rotation `0.01 rad`, translation `0.05 m`. 기존 between_noise(0.05/0.1)와 50,000:1 비율로 pose 0이 과도하게 고정되어, 20개 between factor의 미세 오차가 마지막 pose에 누적 → 일정한 `rot_diff=2.290 rad`(131도) 발산. 비율을 5:1~2:1로 정상화.
+- **invertDelta 버그 수정**: `odom_delta.valid=false`(zero motion) 시 `computeDelta(prev,curr)`가 이미 T_prev_from_curr(GTSAM Between 측정값)인데 `invertDelta`로 불필요하게 반전하고 있었음. invertDelta 제거.
+- **현재 상태**: factor_graph에 IMU factor 미구현 (`(void)imu`). VO between factor만 사용하므로 VO 대비 이점 없음. IMU preintegration factor 추가 필요.
+
 ### 2026-03-11 — VO 좌표변환 완료
 
 - **포즈 누적 (ZED wrapper 정렬)**: solvePnP 출력 T_prev_from_curr를 역변환 없이 직접 사용. `T_global_ = T_global_ * T_cp`. ZED `getPosition(CAMERA)` delta와 동일 규약.
@@ -328,6 +358,12 @@ ZED sensor 토픽과 호환되도록 설정됨.
 
 ### 2026-03-10
 
+- **Factor Graph 버그 수정**: GTSAM Between(i,j) measured=T_i_from_j. odom_delta를 T_prev_from_curr로 수정 (기존 T_curr_from_prev 잘못 전달로 발산).
+- **Factor Graph Phase 5 완료**: factor_graph 모드 통합 완료. PoseOutput/TF 발행, RViz odom→camera_link 궤적 확인.
+- **Factor Graph Phase 4 완료**: factor_graph_window_size, setWindowSize, slide 시 T_base 누적·그래프 재구성, getNextIndex로 인덱스 동기화.
+- **Factor Graph Phase 3 완료**: PoseInput.odom_delta(RelPose), processImages에서 T_curr_from_prev(optical→body) 계산, ImuFusionFactorGraph에서 odom_delta.valid 시 직접 사용.
+- **Factor Graph Phase 2 완료**: factor_graph.hpp/cpp, ImuFusionFactorGraph, addPose/addOdometryFactor/optimize, runVerification, GTSAM linear/NoiseModel.h.
+- **Factor Graph Phase 1 완료**: GTSAM(ros-humble-gtsam) 설치, CMakeLists/package.xml 의존성 추가, colcon build 성공.
 - **IMU-VO fusion**: complementary filter (roll/pitch from IMU, yaw/pos from VO). EKF 15-state (p,v,rpy,gyro_bias,accel_bias): predict from IMU, update from VO pose. fusion_mode: none|complementary|ekf|factor_graph. IMU ZED→ROS REP 103 변환 (az,-ax,-ay), (gz,-gx,-gy).
 - **구독/발행 조건부**: zed_sdk 모드에서 rgb/depth/camera_info/imu 구독 미생성. ros2 모드에서 imu_pub 미생성.
 - **enable_pose_estimation**: 기본값 true (vo_params.yaml).
@@ -348,24 +384,106 @@ ZED sensor 토픽과 호환되도록 설정됨.
 ## 11. 다음 작업 체크리스트
 
 ### 완료
+- [x] Factor Graph Phase 5: factor_graph 통합, PoseOutput/TF 발행, RViz 궤적 확인
+- [x] Factor Graph Phase 4: setWindowSize, T_base 누적, slide 시 그래프 재구성, getNextIndex
+- [x] Factor Graph Phase 3: RelPose/odom_delta, T_curr_from_prev 직접 전달, PnP→Between factor
+- [x] Factor Graph Phase 2: FactorGraphBackend, ImuFusionFactorGraph, runVerification
+- [x] Factor Graph Phase 1: GTSAM 설치, CMakeLists/package.xml, 빌드 성공
 - [x] rgbCallback에서 current_depth_를 processImages에 전달 (ros2/zed_sdk 모드 분리)
 - [x] 3D 점 생성: curr_points + curr_depth → backprojectAndFilter (ZED mm: 50~20000)
 - [x] PnP: solvePnPRansac 호출 + R,t 로그
-- [x] 포즈 누적: T_global (PnP curr→prev 역변환 후 누적, mm→m)
+- [x] 포즈 누적: T_global (ZED wrapper 정렬, T_prev_from_curr 직접 사용)
 - [x] publishResults: camera_pose, vo_state, TF (frames.*, tf.publish 파라미터)
-- [x] 좌표계: REP 103, X↔Y 스왑, x/y/yaw 부호 반전
+- [x] 좌표계: optical→body, TF R_odom_from_camera_link, camera_link 축 정렬
+- [x] zero_motion 회전 체크
+- [x] enable_pose_estimation 연동
+- [x] IMU 발행 (zed_sdk)
+- [x] Complementary filter
+- [x] EKF 15-state
 
-### 다음 (우선순위)
-- [x] **zero_motion 회전 체크**: |θ| < zero_motion_rotation_threshold_rad (0.002) 추가
-- [x] **enable_pose_estimation 연동**: false 시 backproject+PnP/포즈 누적/발행 스킵
-- [x] **IMU 발행**: zed_sdk 모드, getSensorsData → sensor_msgs/Imu (ZED2/ZED Mini)
-- [ ] **실험·평가**: 데이터셋, ATE/RPE, 처리 속도 (§12) — 연구 진행 후 진행
+### 장기 Odometry 로드맵 (RESEARCH_SURVEY.md 순서)
 
-### 선택
-- [x] **Complementary filter**: roll/pitch from IMU (accel+gyro), yaw/pos from VO. 한계: VO yaw/pos 무검증 — 동적 물체에 취약.
-- [ ] **EKF 15-state**: prediction IMU, update VO (다음 개발 우선순위)
-- [ ] **Factor graph + preintegration**: (stub)
-- [ ] 스케일 보정, 번들 조정, 루프 클로저
+1. **Factor Graph + Sliding Window** (단계별 구현·검증)
+
+   > **워크플로우**: 각 Phase 완료 후 `colcon build` + 실행 + 검증 통과 시에만 다음 Phase 진행.
+
+   **Phase 1: 의존성** ✅ 완료
+   - [x] 1.1 GTSAM 설치 확인 (`apt install ros-humble-gtsam`)
+   - [x] 1.2 CMakeLists에 `find_package(GTSAM)` 추가, package.xml 의존성 추가
+   - [x] 1.3 빌드 성공 확인 (`colcon build`)
+
+   **Phase 2: 최소 pose graph (독립 테스트)** ✅ 완료
+   - [x] 2.1 `factor_graph.hpp` 생성: `FactorGraphBackend` 클래스 스켈레톤
+   - [x] 2.2 `addPose(i, x,y,z, roll,pitch,yaw)`, `addOdometryFactor(i, j, delta_pose)` 인터페이스
+   - [x] 2.3 `optimize()` → 최신 pose 반환
+   - [x] 2.4 `ImuFusionFactorGraph` 연동, fusion_mode=factor_graph 시 FactorGraphBackend 사용
+   - [x] 2.5 **검증**: `runVerification()` 3 pose + 2 edge → optimize, vo_node 시작 시 로그
+
+   **Phase 3: VO → Factor 변환** ✅ 완료
+   - [x] 3.1 `processImages`에서 PnP 성공 시 `T_curr_from_prev`(inv(T_prev_from_curr))를 PoseInput.odom_delta로 전달
+   - [x] 3.2 Between factor: odom_delta.valid 시 PnP 측정값 직접 사용, else computeDelta
+   - [x] 3.3 매 프레임: addPose + addOdometryFactor (이미 Phase 2)
+   - [x] 3.4 **검증**: factor_graph 모드 실행, PnP OK, pose 추적 정상
+
+   **Phase 4: Sliding window** ✅ 완료
+   - [x] 4.1 윈도우 크기 N: `imu.factor_graph_window_size` (기본 20, 0=무제한)
+   - [x] 4.2 N 초과 시 가장 오래된 pose 제거, T_base 누적, 그래프 재구성 (prior 재설정)
+   - [x] 4.3 **검증**: factor_graph 모드 실행, sliding window 동작 확인
+
+   **Phase 5: 통합** ✅ 완료
+   - [x] 5.1 `fusion_mode: "factor_graph"` 시 ImuFusionFactorGraph → FactorGraphBackend.optimize() 출력을 pose로 사용
+   - [x] 5.2 EKF/complementary와 동일한 PoseOutput 형식, publishResults(camera_pose, vo_state, TF)
+   - [x] 5.3 **검증**: factor_graph 모드 실행, pose/TF 발행 정상 (RViz에서 odom→camera_link 확인 가능)
+
+2. **루프 클로저**
+   - [ ] 키프레임 선택 (baseline: 0.3~0.5m 또는 15°)
+   - [ ] Place recognition: BoW 또는 PRAM/AnyLoc (학습 기반)
+   - [ ] 루프 감지 시 constraint 추가
+   - [ ] Pose graph optimization (루프 포함)
+   - [ ] Keyframe culling / sliding window 메모리 관리
+
+3. **IMU Preintegration** (5-phase 구현)
+
+   **Phase 1: IMU 버퍼링 인프라** ✅ 완료
+   - [x] 1.1 `vo_node.hpp`: `std::deque<ImuData> imu_buffer_` + `kMaxImuBuffer=500`
+   - [x] 1.2 `imuCallback` + ZED SDK 경로에서 `imu_buffer_.push_back()`
+   - [x] 1.3 소비 코드: 버퍼 drain → `vector<ImuData>`, 각 샘플 좌표 변환
+   - [x] 1.4 `ImuFusionBase::fuse()` 오버로드 (vector 인터페이스, 기본 fallback)
+   - [x] 1.5 검증: `IMU buffer: N samples drained` 로그 (N > 0)
+
+   **Phase 1.5: 고빈도 IMU 폴링** ✅ 완료
+   - [x] 1.5.1 `ZEDInterface::getSensorsDataCurrent()` 추가 (`TIME_REFERENCE::CURRENT`)
+   - [x] 1.5.2 `imuPollLoop()` 전용 스레드 200Hz (`vo_node.cpp`) — ROS2 타이머→스레드 변경 (executor 경합 해소)
+   - [x] 1.5.3 `getImages()`에서 IMU 분리 (이미지/IMU 독립 획득)
+   - [x] 1.5.4 검증: `IMU buffer: N samples drained` N ≈ 5~7 (실측 평균 6)
+
+   **Phase 2: GTSAM IMU preintegration 설정**
+   - [ ] 2.1 `PreintegratedCombinedMeasurements` 파라미터 (acc/gyro noise, bias)
+   - [ ] 2.2 IMU preintegration 함수: `vector<ImuData>` → `PreintegratedCombinedMeasurements`
+   - [ ] 2.3 검증: preintegration 값 로그 (delta_p, delta_v, delta_R)
+
+   **Phase 3: Factor graph IMU factor 통합**
+   - [ ] 3.1 velocity/bias 노드 추가 (NavState)
+   - [ ] 3.2 `CombinedImuFactor` 추가 (between factor와 함께)
+   - [ ] 3.3 `ImuFusionFactorGraph::fuse()` vector 오버로드 구현
+   - [ ] 3.4 검증: factor_graph OK, IMU factor 로그
+
+   **Phase 4: 검증 & 튜닝**
+   - [ ] 4.1 정지 상태 드리프트 비교 (VO-only vs VIO)
+   - [ ] 4.2 동적 장면 드리프트 비교
+   - [ ] 4.3 노이즈 파라미터 튜닝 (acc/gyro sigma)
+
+   **Phase 5: DEV.md 업데이트**
+   - [ ] 5.1 각 Phase 결과 기록
+
+4. **실험·평가** (병행)
+   - [ ] 데이터셋 수집 또는 TUM/EuRoC
+   - [ ] ATE, RPE, 처리 속도 측정
+   - [ ] §12 논문용 메모 기록
+
+### 선택 (후순위)
+- [ ] 3DGS/NeRF SLAM 연구 추적
+- [ ] 스케일 보정, 번들 조정
 
 ---
 

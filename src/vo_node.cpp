@@ -13,6 +13,7 @@
 #include "visual_odometry/frame_processor.hpp"
 #include "visual_odometry/logger.hpp"
 #include "visual_odometry/resource_monitor.hpp"
+#include "visual_odometry/factor_graph.hpp"
 
 namespace vo {
 
@@ -133,10 +134,15 @@ VisualOdometryNode::VisualOdometryNode()
             ekf.chi2_threshold = this->get_parameter("imu.ekf.chi2_threshold").as_double();
             ekf.huber_pos_m = this->get_parameter("imu.ekf.huber_pos_m").as_double();
             ekf.huber_rot_rad = this->get_parameter("imu.ekf.huber_rot_rad").as_double();
+            size_t fg_window = static_cast<size_t>(
+                this->get_parameter("imu.factor_graph_window_size").as_int());
             imu_fusion_ = createImuFusion(fusion_mode,
-                this->get_parameter("imu.complementary_alpha").as_double(), ekf);
+                this->get_parameter("imu.complementary_alpha").as_double(), ekf, fg_window);
             if (imu_fusion_) {
                 RCLCPP_INFO(this->get_logger(), "IMU fusion: %s", fusion_mode.c_str());
+                if (fusion_mode == "factor_graph" && vo::FactorGraphBackend::runVerification()) {
+                    RCLCPP_INFO(this->get_logger(), "FactorGraphBackend verification OK");
+                }
             }
         }
 
@@ -173,6 +179,8 @@ VisualOdometryNode::VisualOdometryNode()
             zed_timer_ = this->create_wall_timer(
                 std::chrono::milliseconds(16),  // 60Hz
                 std::bind(&VisualOdometryNode::zedTimerCallback, this));
+            // 고빈도 IMU 폴링 스레드 (200Hz, getSensorsData(CURRENT))
+            imu_poll_thread_ = std::thread(&VisualOdometryNode::imuPollLoop, this);
         }
 
         // 이미지 처리 스레드 시작
@@ -190,6 +198,9 @@ VisualOdometryNode::~VisualOdometryNode() {
     should_exit_ = true;
     
     // display_thread_ 관련 코드 제거
+    if (imu_poll_thread_.joinable()) {
+        imu_poll_thread_.join();
+    }
     if (processing_thread_.joinable()) {
         processing_thread_.join();
     }
@@ -234,6 +245,7 @@ void VisualOdometryNode::declareParameters()
     this->declare_parameter("imu.fusion_mode", std::string("none"));
     this->declare_parameter("imu.complementary_alpha", 0.98);
     this->declare_parameter("imu.enable", true);
+    this->declare_parameter("imu.factor_graph_window_size", 20);
     this->declare_parameter("imu.ekf.chi2_threshold", 16.8);
     this->declare_parameter("imu.ekf.huber_pos_m", 0.1);
     this->declare_parameter("imu.ekf.huber_rot_rad", 0.1);
@@ -496,6 +508,35 @@ void VisualOdometryNode::imuCallback(const sensor_msgs::msg::Imu::SharedPtr msg)
     latest_imu_.lin_acc_z = msg->linear_acceleration.z;
     latest_imu_.timestamp = rclcpp::Time(msg->header.stamp).seconds();
     latest_imu_.valid = true;
+    // IMU 버퍼링 (preintegration용)
+    imu_buffer_.push_back(latest_imu_);
+    if (imu_buffer_.size() > kMaxImuBuffer) imu_buffer_.pop_front();
+}
+
+void VisualOdometryNode::imuPollLoop() {
+    while (rclcpp::ok() && !should_exit_) {
+        if (!zed_interface_ || !zed_interface_->isConnected()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            continue;
+        }
+        sl::SensorsData sensors;
+        if (zed_interface_->getSensorsDataCurrent(sensors) && sensors.imu.is_available) {
+            {
+                std::lock_guard<std::mutex> lock(imu_mutex_);
+                latest_imu_.ang_vel_x = sensors.imu.angular_velocity.x * M_PI / 180.0;
+                latest_imu_.ang_vel_y = sensors.imu.angular_velocity.y * M_PI / 180.0;
+                latest_imu_.ang_vel_z = sensors.imu.angular_velocity.z * M_PI / 180.0;
+                latest_imu_.lin_acc_x = sensors.imu.linear_acceleration.x;
+                latest_imu_.lin_acc_y = sensors.imu.linear_acceleration.y;
+                latest_imu_.lin_acc_z = sensors.imu.linear_acceleration.z;
+                latest_imu_.timestamp = this->now().seconds();
+                latest_imu_.valid = true;
+                imu_buffer_.push_back(latest_imu_);
+                if (imu_buffer_.size() > kMaxImuBuffer) imu_buffer_.pop_front();
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));  // ~200Hz
+    }
 }
 
 void VisualOdometryNode::depthCallback(const sensor_msgs::msg::Image::SharedPtr msg) {
@@ -525,34 +566,8 @@ bool VisualOdometryNode::getImages(cv::Mat& rgb, cv::Mat& depth) {
             RCLCPP_ERROR(this->get_logger(), "ZED camera is not connected!");
             return false;
         }
-        sl::SensorsData sensors;
-        bool ok = zed_interface_->getImages(rgb, depth, &sensors);
-        if (ok && sensors.imu.is_available) {
-            {
-                std::lock_guard<std::mutex> lock(imu_mutex_);
-                latest_imu_.ang_vel_x = sensors.imu.angular_velocity.x * M_PI / 180.0;
-                latest_imu_.ang_vel_y = sensors.imu.angular_velocity.y * M_PI / 180.0;
-                latest_imu_.ang_vel_z = sensors.imu.angular_velocity.z * M_PI / 180.0;
-                latest_imu_.lin_acc_x = sensors.imu.linear_acceleration.x;
-                latest_imu_.lin_acc_y = sensors.imu.linear_acceleration.y;
-                latest_imu_.lin_acc_z = sensors.imu.linear_acceleration.z;
-                latest_imu_.timestamp = this->now().seconds();
-                latest_imu_.valid = true;
-            }
-            if (imu_pub_ && this->get_parameter("imu.enable").as_bool()) {
-                sensor_msgs::msg::Imu imu_msg;
-            imu_msg.header.stamp = this->now();
-            imu_msg.header.frame_id = this->get_parameter("frames.child_frame_id").as_string();
-            imu_msg.angular_velocity.x = sensors.imu.angular_velocity.x * M_PI / 180.0;
-            imu_msg.angular_velocity.y = sensors.imu.angular_velocity.y * M_PI / 180.0;
-            imu_msg.angular_velocity.z = sensors.imu.angular_velocity.z * M_PI / 180.0;
-            imu_msg.linear_acceleration.x = sensors.imu.linear_acceleration.x;
-            imu_msg.linear_acceleration.y = sensors.imu.linear_acceleration.y;
-            imu_msg.linear_acceleration.z = sensors.imu.linear_acceleration.z;
-            imu_msg.orientation_covariance[0] = -1;  // orientation unknown
-                imu_pub_->publish(imu_msg);
-            }
-        }
+        // IMU 데이터는 imuPollCallback(200Hz)에서 별도 획득
+        bool ok = zed_interface_->getImages(rgb, depth);
         return ok;
     }
     return false;
@@ -606,8 +621,10 @@ void VisualOdometryNode::processImages(const cv::Mat& rgb, const cv::Mat& depth)
         // solvePnP(curr_3d, prev_2d) → R,t = T_prev_from_curr (world→camera)
         // ZED: mOdom2BaseTransf = mOdom2BaseTransf * deltaOdomTf (delta=T_prev_from_curr)
         // T_global_ = T_0_from_curr: odom에서 본 카메라 pose (translation=위치)
+        // odom_delta: T_prev_from_curr (body) for factor_graph Between factor. GTSAM between(i,j)=T_i_from_j.
+        RelPose odom_delta;
         if (enable_pose && result.pnp_success && !result.R.empty() && !result.t.empty()) {
-            cv::Mat R_cp = result.R, t_cp = result.t;  // T_prev_from_curr
+            cv::Mat R_cp = result.R, t_cp = result.t;  // T_prev_from_curr (optical, t mm)
             double t_norm = cv::norm(t_cp);
             double trace_R = R_cp.at<double>(0,0) + R_cp.at<double>(1,1) + R_cp.at<double>(2,2);
             double rot_angle = std::acos(std::min(1.0, std::max(-1.0, (trace_R - 1.0) / 2.0)));
@@ -618,6 +635,28 @@ void VisualOdometryNode::processImages(const cv::Mat& rgb, const cv::Mat& depth)
                 R_cp.copyTo(T_cp(cv::Rect(0, 0, 3, 3)));
                 t_cp.copyTo(T_cp(cv::Rect(3, 0, 1, 3)));
                 T_global_ = T_global_ * T_cp;  // T_0_from_curr = T_0_from_prev * T_prev_from_curr
+                // T_prev_from_curr (optical→body). GTSAM Between(prev,curr) expects measured=T_prev_from_curr
+                static const cv::Mat R_opt_to_body = (cv::Mat_<double>(3, 3) << 0, 0, 1, -1, 0, 0, 0, -1, 0);
+                cv::Mat R_body = R_opt_to_body * R_cp * R_opt_to_body.t();  // R_prev_from_curr (body)
+                cv::Mat t_body = R_opt_to_body * (t_cp / 1000.0);  // m
+                odom_delta.x = t_body.at<double>(0, 0);
+                odom_delta.y = t_body.at<double>(1, 0);
+                odom_delta.z = t_body.at<double>(2, 0);
+                // Between(prev,curr) expects T_prev_from_curr → RPY from R_body (not R_body.t())
+                cv::Mat R_meas = R_body;
+                double sy = std::sqrt(R_meas.at<double>(0,0)*R_meas.at<double>(0,0) +
+                                     R_meas.at<double>(1,0)*R_meas.at<double>(1,0));
+                const double eps = 1e-6;
+                if (sy >= eps) {
+                    odom_delta.roll = std::atan2(R_meas.at<double>(2,1), R_meas.at<double>(2,2));
+                    odom_delta.pitch = std::atan2(-R_meas.at<double>(2,0), sy);
+                    odom_delta.yaw = std::atan2(R_meas.at<double>(1,0), R_meas.at<double>(0,0));
+                } else {
+                    odom_delta.roll = std::atan2(-R_meas.at<double>(1,2), R_meas.at<double>(1,1));
+                    odom_delta.pitch = std::atan2(-R_meas.at<double>(2,0), sy);
+                    odom_delta.yaw = 0.0;
+                }
+                odom_delta.valid = true;
             }
         }
         // === 좌표계: optical → body (odom→camera_link) ===
@@ -661,9 +700,12 @@ void VisualOdometryNode::processImages(const cv::Mat& rgb, const cv::Mat& depth)
                 imu_fusion_->reset();
             }
             ImuData imu;
+            std::vector<ImuData> imu_samples;
             {
                 std::lock_guard<std::mutex> lock(imu_mutex_);
                 imu = latest_imu_;
+                imu_samples.assign(imu_buffer_.begin(), imu_buffer_.end());
+                imu_buffer_.clear();
             }
             // IMU: ZED(IMAGE, X right Y down Z forward) → ROS REP 103 (X forward Y left Z up)
             // acc_ros=(az,-ax,-ay), gyro_ros=(gz,-gx,-gy). level시 gravity=(0,0,-9.8)
@@ -677,6 +719,13 @@ void VisualOdometryNode::processImages(const cv::Mat& rgb, const cv::Mat& depth)
                 imu.ang_vel_y = -gx;
                 imu.ang_vel_z = -gy;
             }
+            // 버퍼 각 샘플에도 좌표 변환 적용
+            for (auto& s : imu_samples) {
+                double ax = s.lin_acc_x, ay = s.lin_acc_y, az = s.lin_acc_z;
+                double gx = s.ang_vel_x, gy = s.ang_vel_y, gz = s.ang_vel_z;
+                s.lin_acc_x = az;  s.lin_acc_y = -ax; s.lin_acc_z = -ay;
+                s.ang_vel_x = gz;  s.ang_vel_y = -gx; s.ang_vel_z = -gy;
+            }
             double dt = (last_fusion_time_.nanoseconds() > 0) ?
                 (this->now() - last_fusion_time_).seconds() : 0.02;
             last_fusion_time_ = this->now();
@@ -689,8 +738,11 @@ void VisualOdometryNode::processImages(const cv::Mat& rgb, const cv::Mat& depth)
             vo_in.pitch = metrics.pose_pitch;
             vo_in.yaw = metrics.pose_yaw;
             vo_in.valid = metrics.pnp_success;  // PnP 실패 시 stale pose → EKF가 position hold
+            vo_in.odom_delta = odom_delta;  // Phase 3: T_curr_from_prev (factor_graph용)
 
-            PoseOutput fused = imu_fusion_->fuse(vo_in, imu, dt);
+            RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                "IMU buffer: %zu samples drained", imu_samples.size());
+            PoseOutput fused = imu_fusion_->fuse(vo_in, imu, dt, imu_samples);
             metrics.pose_x = fused.x;
             metrics.pose_y = fused.y;
             metrics.pose_z = fused.z;

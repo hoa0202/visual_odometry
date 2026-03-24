@@ -10,6 +10,7 @@
 #include "visual_odometry/types.hpp"
 #include <thread>
 #include <mutex>
+#include <deque>
 #include "visual_odometry/zed_interface.hpp"
 #include <deque>
 #include <queue>
@@ -182,10 +183,16 @@ private:
     // IMU-VO fusion
     std::unique_ptr<ImuFusionBase> imu_fusion_;
     ImuData latest_imu_;
+    std::deque<ImuData> imu_buffer_;
+    static constexpr size_t kMaxImuBuffer = 500;  // ~1.25초 @400Hz
     std::mutex imu_mutex_;
     rclcpp::Time last_fusion_time_;
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_;
     void imuCallback(const sensor_msgs::msg::Imu::SharedPtr msg);
+
+    // ZED SDK 고빈도 IMU 폴링 스레드 (200Hz, TIME_REFERENCE::CURRENT)
+    std::thread imu_poll_thread_;
+    void imuPollLoop();
 
     // 평균 이동 거리 계산 함수
     float calculateAverageMovement(const FeatureMatches& matches);
