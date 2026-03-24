@@ -4,7 +4,7 @@
     input:
       source: "zed_sdk"  # "ros2" 또는 "zed_sdk"
       zed:
-        serial_number: 35847285
+        serial_number: 31667076 #35847285
         resolution: "HD720"  # HD2K, HD1080, HD720
         fps: 60
         depth_mode: "NEURAL_LIGHT"  # PERFORMANCE, QUALITY, ULTRA
@@ -28,8 +28,9 @@
     # IMU (zed_sdk 모드, ZED2/ZED Mini만)
     imu:
       enable: false  # IMU 발행 활성화
-      fusion_mode: "none"  # "none" | "complementary" | "ekf" | "factor_graph"
+      fusion_mode: "factor_graph"  # "none" | "complementary" | "ekf" | "factor_graph"
       complementary_alpha: 0.98  # complementary filter: gyro trust (0.95~0.99)
+      factor_graph_window_size: 20  # sliding window (0=무제한)
       ekf:
         chi2_threshold: 16.8   # χ²(6, 0.99), innovation gate
         huber_pos_m: 0.1        # position innovation clip (m)

@@ -32,6 +32,7 @@ find_package(geometry_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
+find_package(GTSAM REQUIRED)
 
 # 메시지 생성 (ament_package 전에 호출)
 rosidl_generate_interfaces(${PROJECT_NAME}
@@ -65,6 +66,8 @@ set(SOURCES
   src/frame_processor.cpp
   src/imu_fusion_ekf.cpp
   src/imu_fusion_factory.cpp
+  src/imu_fusion_factor_graph.cpp
+  src/factor_graph.cpp
   src/resource_monitor.cpp
   src/logger.cpp
 )
@@ -77,6 +80,7 @@ target_link_libraries(vo_node
   ${OpenCV_LIBRARIES}
   ${ZED_LIBRARIES}
   ${CUDA_LIBRARIES}
+  gtsam
   "${cpp_typesupport_target}"
 )
 
