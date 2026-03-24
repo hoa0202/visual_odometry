@@ -61,6 +61,14 @@ public:
     /** preintegration 초기화 여부 */
     bool isImuReady() const;
 
+    /** Phase 3: IMU factor를 그래프에 추가 (CombinedImuFactor).
+     *  addPose() 후, addOdometryFactor()와 함께 호출.
+     *  velocity/bias 초기값 자동 삽입. */
+    void addImuFactor(size_t i, size_t j, double dt_sec);
+
+    /** Phase 3: velocity/bias 초기값 설정 (i=0 prior용) */
+    void addVelocityBiasPrior(size_t i);
+
     /** prev→curr 상대 pose (T_curr_from_prev). addOdometryFactor에는 T_prev_from_curr 필요. */
     static DeltaPose computeDelta(const PoseOutput& prev, const PoseOutput& curr);
     /** DeltaPose 역변환 (T_curr_from_prev → T_prev_from_curr) */

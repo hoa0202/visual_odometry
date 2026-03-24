@@ -321,6 +321,18 @@ ZED sensor 토픽과 호환되도록 설정됨.
 
 ## 10. 변경 이력 (Changelog)
 
+### 2026-03-20 — Phase 3: CombinedImuFactor 통합 (VIO)
+
+- **CombinedImuFactor**: GTSAM의 IMU preintegration을 factor graph에 실제 적용
+  - 심볼 규약: `x(i)` Pose3, `v(i)` Vector3 (velocity), `b(i)` imuBias::ConstantBias
+  - `addVelocityBiasPrior(0)`: 첫 프레임에서 velocity=0, bias=0 prior 추가
+  - `addImuFactor(i, j)`: CombinedImuFactor(pose_i, vel_i, pose_j, vel_j, bias_i, bias_j, PIM)
+- **velocity 초기값**: NavState predict로 PIM에서 예측. bias는 이전 최적화 결과 전파.
+- **optimize() 후**: 최적화된 velocity/bias를 `prev_velocity`, `prev_bias`에 저장 → 다음 프레임 초기값
+- **sliding window 확장**: v/b 노드도 shift (k→k-1). 새 앵커(node 0)에 v/b prior 재설정. IMU factor는 slide 시 drop → 새 프레임부터 자동 추가.
+- **흐름**: `fuse(vector)` → preintegrateImu → imu_preintegrated=true → `fuse()` → addPose + addVelocityBiasPrior(첫프레임) + addOdometryFactor + addImuFactor → optimize
+- **수정 파일**: `factor_graph.hpp`, `factor_graph.cpp`, `imu_fusion_factor_graph.cpp`
+
 ### 2026-03-24 — Phase 2: GTSAM IMU Preintegration 설정
 
 - **PreintegrationCombinedParams**: ZED 2i BMI088 IMU 기본 노이즈 파라미터 설정
@@ -469,16 +481,17 @@ ZED sensor 토픽과 호환되도록 설정됨.
    - [x] 1.5.3 `getImages()`에서 IMU 분리 (이미지/IMU 독립 획득)
    - [x] 1.5.4 검증: `IMU buffer: N samples drained` N ≈ 5~7 (실측 평균 6)
 
-   **Phase 2: GTSAM IMU preintegration 설정** 🔧 검증 중
+   **Phase 2: GTSAM IMU preintegration 설정** ✅ 완료
    - [x] 2.1 `PreintegrationCombinedParams` 파라미터 (acc/gyro noise, bias RW, gravity)
    - [x] 2.2 `preintegrateImu()`: `vector<ImuData>` → `PreintegratedCombinedMeasurements`
-   - [ ] 2.3 검증: `IMU preint: dt=... dp=(...) dv=(...) rpy=(...)deg` 로그 확인
+   - [x] 2.3 검증: `IMU preint: dt=... dp=(...) dv=(...) rpy=(...)deg` 로그 확인
 
-   **Phase 3: Factor graph IMU factor 통합**
-   - [ ] 3.1 velocity/bias 노드 추가 (NavState)
-   - [ ] 3.2 `CombinedImuFactor` 추가 (between factor와 함께)
-   - [ ] 3.3 `ImuFusionFactorGraph::fuse()` vector 오버로드 구현
-   - [ ] 3.4 검증: factor_graph OK, IMU factor 로그
+   **Phase 3: Factor graph IMU factor 통합** 🔧 검증 중
+   - [x] 3.1 velocity/bias 노드 추가 (`v(i)` Vector3, `b(i)` ConstantBias, prior)
+   - [x] 3.2 `CombinedImuFactor` 추가 (BetweenFactor + IMU factor 동시)
+   - [x] 3.3 `ImuFusionFactorGraph::fuse()` — preintegrate → imu_preintegrated flag → addImuFactor
+   - [x] 3.4 sliding window에서 v/b 노드 shift + prior 재설정
+   - [ ] 3.5 검증: factor_graph OK + `IMU factor added` 로그
 
    **Phase 4: 검증 & 튜닝**
    - [ ] 4.1 정지 상태 드리프트 비교 (VO-only vs VIO)

@@ -75,11 +75,22 @@ struct FactorGraphBackend::Impl {
     std::unique_ptr<gtsam::PreintegratedCombinedMeasurements> pim;
     bool imu_ready{false};
 
+    // Phase 3: velocity/bias 노드 관리
+    gtsam::SharedNoiseModel vel_prior_noise;
+    gtsam::SharedNoiseModel bias_prior_noise;
+    gtsam::imuBias::ConstantBias prev_bias;  // 최근 추정 bias (preintegration reset용)
+    gtsam::Vector3 prev_velocity{0, 0, 0};   // 최근 추정 velocity
+    bool has_imu_factors{false};              // IMU factor 존재 여부 (sliding window용)
+
     Impl() {
         prior_noise = gtsam::noiseModel::Diagonal::Sigmas(
             (gtsam::Vector(6) << 0.01, 0.01, 0.01, 0.05, 0.05, 0.05).finished());
         between_noise = gtsam::noiseModel::Diagonal::Sigmas(
             (gtsam::Vector(6) << 0.05, 0.05, 0.05, 0.1, 0.1, 0.1).finished());
+        // velocity prior: 정지 시작 가정, 넉넉한 sigma
+        vel_prior_noise = gtsam::noiseModel::Isotropic::Sigma(3, 0.5);  // m/s
+        // bias prior: zero bias 가정, 넉넉한 sigma
+        bias_prior_noise = gtsam::noiseModel::Isotropic::Sigma(6, 0.1);
     }
 };
 
@@ -147,6 +158,16 @@ PoseOutput FactorGraphBackend::optimize() {
         impl_->initial.clear();
         const size_t n_old = impl_->next_idx;
 
+        // 최적화된 velocity/bias 저장 (slide 후 재사용)
+        gtsam::Key last_vel_old = gtsam::Symbol('v', static_cast<gtsam::Key>(n_old - 1));
+        gtsam::Key last_bias_old = gtsam::Symbol('b', static_cast<gtsam::Key>(n_old - 1));
+        if (old_result.exists(last_vel_old)) {
+            impl_->prev_velocity = old_result.at<gtsam::Vector3>(last_vel_old);
+        }
+        if (old_result.exists(last_bias_old)) {
+            impl_->prev_bias = old_result.at<gtsam::imuBias::ConstantBias>(last_bias_old);
+        }
+
         for (size_t k = 1; k < n_old; ++k) {
             gtsam::Key old_key = gtsam::Symbol('x', static_cast<gtsam::Key>(k));
             if (!old_result.exists(old_key)) break;
@@ -169,15 +190,37 @@ PoseOutput FactorGraphBackend::optimize() {
             }
         }
         impl_->next_idx = n_old - 1;
+        // Phase 3: sliding 후 v/b 노드 전부 drop (unconstrained 방지).
+        // 새 앵커(node 0)에만 v/b prior 추가. 나머지는 addImuFactor()가 필요 시 생성.
+        {
+            gtsam::Key anchor_vel = gtsam::Symbol('v', 0);
+            gtsam::Key anchor_bias = gtsam::Symbol('b', 0);
+            impl_->initial.insert(anchor_vel, impl_->prev_velocity);
+            impl_->initial.insert(anchor_bias, impl_->prev_bias);
+            impl_->graph.add(gtsam::PriorFactor<gtsam::Vector3>(
+                anchor_vel, impl_->prev_velocity, impl_->vel_prior_noise));
+            impl_->graph.add(gtsam::PriorFactor<gtsam::imuBias::ConstantBias>(
+                anchor_bias, impl_->prev_bias, impl_->bias_prior_noise));
+        }
     }
 
     gtsam::LevenbergMarquardtParams params;
     params.setMaxIterations(20);
     gtsam::LevenbergMarquardtOptimizer opt(impl_->graph, impl_->initial, params);
     gtsam::Values result = opt.optimize();
-    gtsam::Key last_key = gtsam::Symbol('x', static_cast<gtsam::Key>(impl_->next_idx - 1));
+    size_t last_idx = impl_->next_idx - 1;
+    gtsam::Key last_key = gtsam::Symbol('x', static_cast<gtsam::Key>(last_idx));
     if (result.exists(last_key)) {
         fromPose3(result.at<gtsam::Pose3>(last_key), out);
+    }
+    // Phase 3: 최적화된 velocity/bias 저장 (다음 프레임 초기값 + preintegration bias reset)
+    gtsam::Key last_vel = gtsam::Symbol('v', static_cast<gtsam::Key>(last_idx));
+    gtsam::Key last_bias = gtsam::Symbol('b', static_cast<gtsam::Key>(last_idx));
+    if (result.exists(last_vel)) {
+        impl_->prev_velocity = result.at<gtsam::Vector3>(last_vel);
+    }
+    if (result.exists(last_bias)) {
+        impl_->prev_bias = result.at<gtsam::imuBias::ConstantBias>(last_bias);
     }
     return out;
 }
@@ -238,10 +281,82 @@ bool FactorGraphBackend::isImuReady() const {
     return impl_->imu_ready;
 }
 
+void FactorGraphBackend::addVelocityBiasPrior(size_t i) {
+    gtsam::Key vel_key = gtsam::Symbol('v', static_cast<gtsam::Key>(i));
+    gtsam::Key bias_key = gtsam::Symbol('b', static_cast<gtsam::Key>(i));
+
+    gtsam::Vector3 zero_vel(0, 0, 0);
+    gtsam::imuBias::ConstantBias zero_bias;
+
+    impl_->initial.insert(vel_key, zero_vel);
+    impl_->initial.insert(bias_key, zero_bias);
+
+    impl_->graph.add(gtsam::PriorFactor<gtsam::Vector3>(
+        vel_key, zero_vel, impl_->vel_prior_noise));
+    impl_->graph.add(gtsam::PriorFactor<gtsam::imuBias::ConstantBias>(
+        bias_key, zero_bias, impl_->bias_prior_noise));
+
+    impl_->prev_velocity = zero_vel;
+    impl_->prev_bias = zero_bias;
+}
+
+void FactorGraphBackend::addImuFactor(size_t i, size_t j, double dt_sec) {
+    if (!impl_->imu_ready || !impl_->pim) return;
+    if (impl_->pim->deltaTij() < 1e-6) return;  // preintegration 데이터 없음
+
+    gtsam::Key pose_i = gtsam::Symbol('x', static_cast<gtsam::Key>(i));
+    gtsam::Key vel_i = gtsam::Symbol('v', static_cast<gtsam::Key>(i));
+    gtsam::Key bias_i = gtsam::Symbol('b', static_cast<gtsam::Key>(i));
+    gtsam::Key pose_j = gtsam::Symbol('x', static_cast<gtsam::Key>(j));
+    gtsam::Key vel_j = gtsam::Symbol('v', static_cast<gtsam::Key>(j));
+    gtsam::Key bias_j = gtsam::Symbol('b', static_cast<gtsam::Key>(j));
+
+    // i 노드에 velocity/bias 초기값 확인 (sliding window 후 없을 수 있음)
+    if (!impl_->initial.exists(vel_i)) {
+        impl_->initial.insert(vel_i, impl_->prev_velocity);
+    }
+    if (!impl_->initial.exists(bias_i)) {
+        impl_->initial.insert(bias_i, impl_->prev_bias);
+    }
+
+    // CombinedImuFactor 추가
+    impl_->graph.add(gtsam::CombinedImuFactor(
+        pose_i, vel_i, pose_j, vel_j, bias_i, bias_j, *impl_->pim));
+
+    // velocity 초기값: PIM predict from previous velocity
+    gtsam::NavState prev_state(
+        impl_->initial.exists(pose_i) ?
+            impl_->initial.at<gtsam::Pose3>(pose_i) :
+            gtsam::Pose3(),
+        impl_->prev_velocity);
+    gtsam::NavState predicted = impl_->pim->predict(prev_state, impl_->prev_bias);
+    gtsam::Vector3 pred_vel = predicted.velocity();
+
+    // j 노드에 velocity/bias 초기값 삽입
+    if (!impl_->initial.exists(vel_j)) {
+        impl_->initial.insert(vel_j, pred_vel);
+    }
+    if (!impl_->initial.exists(bias_j)) {
+        impl_->initial.insert(bias_j, impl_->prev_bias);
+    }
+
+    impl_->has_imu_factors = true;
+
+    auto logger = rclcpp::get_logger("factor_graph");
+    static auto clock = std::make_shared<rclcpp::Clock>(RCL_STEADY_TIME);
+    RCLCPP_INFO_THROTTLE(logger, *clock, 5000,
+        "IMU factor added: (%zu→%zu) dt=%.3f pred_vel=(%.3f,%.3f,%.3f)",
+        i, j, impl_->pim->deltaTij(),
+        pred_vel.x(), pred_vel.y(), pred_vel.z());
+}
+
 void FactorGraphBackend::reset() {
     impl_->graph.resize(0);
     impl_->initial.clear();
     impl_->next_idx = 0;
+    impl_->has_imu_factors = false;
+    impl_->prev_velocity = gtsam::Vector3(0, 0, 0);
+    impl_->prev_bias = gtsam::imuBias::ConstantBias();
 }
 
 bool FactorGraphBackend::runVerification() {

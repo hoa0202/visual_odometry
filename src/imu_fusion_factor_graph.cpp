@@ -18,6 +18,7 @@ struct ImuFusionFactorGraph::Impl {
     FactorGraphBackend backend;
     PoseOutput prev_pose;
     bool has_prev{false};
+    bool imu_preintegrated{false};  // 현재 프레임에서 preintegration 완료 여부
 };
 
 ImuFusionFactorGraph::ImuFusionFactorGraph(size_t window_size)
@@ -52,6 +53,11 @@ PoseOutput ImuFusionFactorGraph::fuse(const PoseInput& vo_pose,
     impl_->backend.addPose(idx, curr.x, curr.y, curr.z,
                            curr.roll, curr.pitch, curr.yaw);
 
+    // Phase 3: 첫 프레임에서 velocity/bias prior 추가
+    if (idx == 0) {
+        impl_->backend.addVelocityBiasPrior(0);
+    }
+
     if (idx > 0) {
         DeltaPose delta;
         if (vo_pose.odom_delta.valid) {
@@ -65,6 +71,12 @@ PoseOutput ImuFusionFactorGraph::fuse(const PoseInput& vo_pose,
             delta = FactorGraphBackend::computeDelta(impl_->prev_pose, curr);
         }
         impl_->backend.addOdometryFactor(idx - 1, idx, delta);
+
+        // Phase 3: preintegration 완료 시 CombinedImuFactor 추가
+        if (impl_->imu_preintegrated) {
+            impl_->backend.addImuFactor(idx - 1, idx, dt_sec);
+            impl_->imu_preintegrated = false;
+        }
     }
 
     PoseOutput result = impl_->backend.optimize();
@@ -102,12 +114,12 @@ PoseOutput ImuFusionFactorGraph::fuse(const PoseInput& vo_pose,
 PoseOutput ImuFusionFactorGraph::fuse(const PoseInput& vo_pose, const ImuData& imu,
                                       double dt_sec,
                                       const std::vector<ImuData>& imu_samples) {
-    // Phase 2: preintegrate IMU 샘플 + 로그 (factor graph에는 아직 적용 안 함)
+    // Phase 3: preintegrate IMU 샘플 → fuse()에서 CombinedImuFactor로 그래프에 추가
     if (!imu_samples.empty() && impl_->backend.isImuReady()) {
         impl_->backend.preintegrateImu(imu_samples);
         impl_->backend.logPreintegration();
+        impl_->imu_preintegrated = true;  // fuse()에서 addImuFactor 호출 트리거
     }
-    // 기존 VO-only factor graph 로직
     return fuse(vo_pose, imu, dt_sec);
 }
 
