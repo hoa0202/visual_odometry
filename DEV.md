@@ -464,12 +464,7 @@ ZED sensor 토픽과 호환되도록 설정됨.
    - [x] 5.2 EKF/complementary와 동일한 PoseOutput 형식, publishResults(camera_pose, vo_state, TF)
    - [x] 5.3 **검증**: factor_graph 모드 실행, pose/TF 발행 정상 (RViz에서 odom→camera_link 확인 가능)
 
-2. **루프 클로저**
-   - [ ] 키프레임 선택 (baseline: 0.3~0.5m 또는 15°)
-   - [ ] Place recognition: BoW 또는 PRAM/AnyLoc (학습 기반)
-   - [ ] 루프 감지 시 constraint 추가
-   - [ ] Pose graph optimization (루프 포함)
-   - [ ] Keyframe culling / sliding window 메모리 관리
+2. **루프 클로저** → §5로 이동 (동적 물체 대응 완료 후 진행)
 
 3. **IMU Preintegration** (5-phase 구현)
 
@@ -509,62 +504,83 @@ ZED sensor 토픽과 호환되도록 설정됨.
    - [x] 5.3 기본 between_noise 상향 (0.08/0.15)
    - ⚠️ **한계**: factor-level noise 조절은 보조 수단. 단독으로는 불충분 (아래 §4 참조)
 
-4. **동적 물체 Robust 대응** (ORB-SLAM3/VINS-Mono 표준 접근)
+4. **동적 물체 Robust 대응**
 
-   > **배경**: 대표 VIO/SLAM 시스템(ORB-SLAM3, VINS-Mono, RTAB-Map)은 전부
-   > **feature 단위 outlier rejection**이 동적 물체 대응의 핵심 방어선.
-   > factor graph noise 조절(현재 Phase 5)은 PnP 결과가 이미 오염된 뒤의
-   > 후처리이므로, 올바른 VO 정보까지 같이 버리는 부작용이 있음.
+   > **배경 및 교훈**:
+   > - Factor-level noise 조절(IMU-VO consistency)은 정지 시에는 효과적이나,
+   >   이동 중에는 프레임당 오염이 mm 단위로 작아 노이즈와 구분 불가 → 한계 도달
+   > - RANSAC inlier ratio 체크는 물체가 FOV 대부분을 차지하면 RANSAC 자체가
+   >   물체 운동에 fit → inlier ratio ≈100% → 작동 안 함
+   > - **핵심 해결책**: IMU-guided feature filtering (OpenVINS chi² gating과 동일 접근)
+   >   PnP 전에 IMU-predicted pose로 각 feature를 검증, 동적 물체 feature를 제거
    >
-   > **올바른 방어 계층 (대표 SLAM 기준)**:
+   > **방어 계층 (최종 설계)**:
    > ```
-   > Layer 1: Feature-level (RANSAC + 재투영 에러)  ← 핵심, 가성비 최고
-   > Layer 2: Robust kernel (Huber/Cauchy on factor) ← 간단, 효과적
-   > Layer 3: Factor-level noise (IMU-VO consistency) ← 보조 (현재 구현)
-   > Layer 4: Semantic masking (사람/차량 영역 제외)  ← 고급, GPU 필요
+   > Layer 0: IMU-guided feature filtering  ← 핵심 (PnP 전 전처리) ★ 다음 구현
+   > Layer 1: RANSAC PnP + inlier ratio     ← 기본 (구현 완료)
+   > Layer 2: Huber robust kernel            ← factor graph (구현 완료)
+   > Layer 3: IMU-VO consistency + ZUPT      ← 보조 (구현 완료, 튜닝 완료)
+   > Layer 4: Semantic masking               ← 고급, 후순위
    > ```
 
-   **Phase 1: RANSAC inlier ratio 기반 VO 신뢰도** (ORB-SLAM3 핵심)
-   - [ ] 1.1 PnP 결과에서 `inlier_ratio = inliers / total_matches` 계산
-   - [ ] 1.2 `PoseInput`에 `vo_confidence` 필드 추가 (0.0~1.0)
-   - [ ] 1.3 `inlier_ratio < 0.5` → noise_scale 증가, `< 0.3` → VO 폐기 (IMU only)
-   - [ ] 1.4 기존 `computeImuVoConsistency()`와 합산 (max)
-   - [ ] 1.5 검증: 물체 이동 시 `low inlier ratio` 로그 + VO 영향 감소 확인
+   **Phase 1: RANSAC inlier ratio 기반 VO 신뢰도** ✅ 구현
+   - [x] 1.1 `inlier_ratio = inliers / total_matches` 계산 (`frame_processor`)
+   - [x] 1.2 `PoseInput.vo_confidence` 필드 → factor graph noise 조절
+   - [x] 1.3 `< 0.5` noise_scale 증가, `< 0.3` VO 거의 폐기
+   - ⚠️ **한계**: 물체가 FOV 대부분 차지 시 RANSAC이 물체에 fit → ratio ≈ 100%
 
-   **Phase 2: PnP 후 재투영 에러 필터** (ORB-SLAM3/VINS 표준)
-   - [ ] 2.1 PnP 결과 R,t로 모든 3D점 재투영 (`cv::projectPoints`)
-   - [ ] 2.2 재투영 에러 > threshold (e.g. 3px)인 점 제거
-   - [ ] 2.3 남은 inlier로 PnP 재계산 (2차 refinement)
-   - [ ] 2.4 검증: 재투영 에러 분포 로그, 동적 물체 점 제거율
+   **Phase 2: Huber robust kernel on BetweenFactor** ✅ 구현
+   - [x] 2.1 `noiseModel::Robust::Create(Huber(0.5), noise)` 적용
 
-   **Phase 3: Huber robust kernel on BetweenFactor** (간단, 효과적)
-   - [ ] 3.1 `addOdometryFactor()`에서 `noiseModel::Robust::Create(Huber, noise)` 적용
-   - [ ] 3.2 Huber delta 파라미터 튜닝 (기본 0.5)
-   - [ ] 3.3 검증: outlier 프레임의 factor 영향 감소 확인
+   **Phase 3: IMU-VO consistency 벡터 비교 + ZUPT 연동** ✅ 구현 (튜닝 완료)
+   - [x] 3.1 `computeImuVoConsistency()`: 벡터 차이 비교 (방향+크기)
+   - [x] 3.2 데드존 0.01m/0.03rad, 스케일 8x, 최대 20x
+   - [x] 3.3 ZUPT+VO conflict: 정지 시 VO 5mm 이상 → noise_scale=20 (VO 폐기)
+   - ⚠️ **한계**: 이동 중 프레임당 오염 mm 단위 → 노이즈와 구분 불가
 
-   **Phase 4: Multi-view consistency** (중급, 선택)
-   - [ ] 4.1 N 프레임 이상 추적된 feature만 PnP에 사용
-   - [ ] 4.2 짧게 나타났다 사라지는 feature (동적 물체) 자동 필터
+   **Phase 4: IMU-guided feature filtering** (OpenVINS chi² gating) ✅ 완료
+   > PnP **전에** IMU-predicted pose로 각 feature를 검증.
+   > 동적 물체의 feature는 IMU 예측과 불일치 → 제거 → 깨끗한 feature로 PnP.
+   > OpenVINS의 Mahalanobis gating과 수학적으로 동일한 접근.
 
-   **Phase 5: Semantic masking** (고급, 후순위)
-   - [ ] 5.1 경량 segmentation (MobileNet/YOLO)으로 사람/차량 마스크
-   - [ ] 5.2 마스크 영역 feature 추출 제외
-   - [ ] 5.3 DynaSLAM/DS-SLAM 계열 접근
+   - [x] 4.1 IMU preintegration delta (R,t)를 frame_processor에 전달하는 인터페이스
+     - `ImuPredictedPose` struct (frame_processor.hpp), `processFrame()` 파라미터 추가
+   - [x] 4.2 IMU-predicted pose로 prev_3D점 재투영 (`cv::projectPoints`)
+     - vo_node.cpp: IMU gyro/acc 적분 → body→optical 변환 → R,t 계산
+   - [x] 4.3 재투영 에러 > threshold (5px)인 feature 제거
+     - frame_processor.cpp: projected vs prev_points 비교, threshold 초과 제거
+   - [x] 4.4 남은 feature로 PnP 실행 (오염 제거된 상태)
+   - [x] 4.5 최소 feature 수 보장 (< 10개면 fallback: 기존 전체 PnP)
+   - [x] 4.6 검증: `IMU-guided: removed N/M features` 로그 + 이동 중 드리프트 감소
+     - 테스트 결과: 동적 물체 feature 49~94% 제거, 이동 중 드리프트 개선 확인
 
-   > **비교표: 대표 시스템 vs 우리 시스템**
-   > | 방어 계층 | ORB-SLAM3 | VINS-Mono | RTAB-Map | 우리 |
-   > |-----------|-----------|-----------|----------|------|
-   > | RANSAC PnP | ✅ | ✅ | ✅ | ✅ |
-   > | Inlier ratio 체크 | ✅ | ✅ (fundamental) | ✅ | ❌→Phase 1 |
-   > | 재투영 에러 필터 | ✅ (BA 내) | ✅ (chi²) | ✅ | ❌→Phase 2 |
-   > | Robust kernel | ✅ (Huber) | ❌ | ❌ | ❌→Phase 3 |
-   > | Factor noise 조절 | ❌ | ❌ | ❌ | ✅ (보조) |
-   > | Semantic mask | ❌ | ❌ | ❌ | ❌→Phase 5 |
+   **Phase 5: Multi-view consistency** (중급, 선택)
+   - [ ] 5.1 N 프레임 이상 추적된 feature만 PnP에 사용
+   - [ ] 5.2 짧게 나타났다 사라지는 feature (동적 물체) 자동 필터
 
-5. **실험·평가** (병행)
+   **Phase 6: Semantic masking** (고급, 후순위)
+   - [ ] 6.1 경량 segmentation (MobileNet/YOLO)으로 사람/차량 마스크
+   - [ ] 6.2 마스크 영역 feature 추출 제외
+
+   > **비교표: 대표 시스템 vs 우리 시스템 (현재 → 목표)**
+   > | 방어 계층 | OpenVINS | ORB-SLAM3 | RTAB-Map | 우리 (현재) | 우리 (Phase 4 후) |
+   > |-----------|----------|-----------|----------|------------|------------------|
+   > | RANSAC PnP | ✅ | ✅ | ✅ | ✅ | ✅ |
+   > | IMU-guided filtering | ✅ chi² | ❌ | ❌ | ✅ Phase 4 완료 | ✅ |
+   > | Robust kernel | ❌ | ✅ (Huber) | ❌ | ✅ | ✅ |
+   > | IMU-VO noise 조절 | ❌ | ❌ | ❌ | ✅ | ✅ |
+   > | Multi-round BA | ❌ | ✅ | ✅ | ❌ | ❌ |
+   > | Semantic mask | ❌ | ❌ | ❌ | ❌ | ❌ |
+
+5. **루프 클로저** (Phase 4 이후)
+   - [ ] 키프레임 선택 (baseline: 0.3~0.5m 또는 15°)
+   - [ ] Place recognition: BoW 또는 학습 기반
+   - [ ] 루프 감지 시 constraint 추가 → Pose graph optimization
+   - [ ] 장거리 누적 드리프트 보정
+
+6. **실험·평가** (병행)
    - [ ] 데이터셋 수집 또는 TUM/EuRoC
    - [ ] ATE, RPE, 처리 속도 측정
-   - [ ] §12 논문용 메모 기록
 
 ### 선택 (후순위)
 - [ ] 루프 클로저

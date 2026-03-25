@@ -1,6 +1,7 @@
 #include "visual_odometry/vo_node.hpp"
 #include <cv_bridge/cv_bridge.h>
 #include <opencv2/imgproc.hpp>
+#include <opencv2/calib3d.hpp>
 #include <cmath>
 #include <tf2/LinearMath/Matrix3x3.h>
 #include <tf2/LinearMath/Quaternion.h>
@@ -600,7 +601,66 @@ void VisualOdometryNode::processImages(const cv::Mat& rgb, const cv::Mat& depth)
 
         auto start_time = std::chrono::steady_clock::now();
         bool enable_pose = this->get_parameter("processing.enable_pose_estimation").as_bool();
-        auto result = frame_processor_->processFrame(rgb, depth, camera_params_, first_frame_, enable_pose);
+
+        // Phase 4: IMU-guided feature filtering — PnP 전에 IMU-predicted pose 계산
+        // IMU buffer를 peek(복사)해서 간단 gyro/acc integration → optical frame R,t
+        ImuPredictedPose imu_pred;
+        if (enable_pose && imu_fusion_ && !first_frame_) {
+            std::vector<ImuData> imu_peek;
+            {
+                std::lock_guard<std::mutex> lock(imu_mutex_);
+                imu_peek.assign(imu_buffer_.begin(), imu_buffer_.end());
+            }
+            if (imu_peek.size() >= 2) {
+                // ZED→ROS 좌표 변환 (peek 복사본에만 적용)
+                for (auto& s : imu_peek) {
+                    double ax = s.lin_acc_x, ay = s.lin_acc_y, az = s.lin_acc_z;
+                    double gx = s.ang_vel_x, gy = s.ang_vel_y, gz = s.ang_vel_z;
+                    s.lin_acc_x = az;  s.lin_acc_y = -ax; s.lin_acc_z = -ay;
+                    s.ang_vel_x = gz;  s.ang_vel_y = -gx; s.ang_vel_z = -gy;
+                }
+                // Gyro integration → body frame rotation delta
+                double wx = 0, wy = 0, wz = 0, total_dt = 0;
+                for (size_t i = 0; i < imu_peek.size(); ++i) {
+                    double dt_s;
+                    if (i + 1 < imu_peek.size())
+                        dt_s = imu_peek[i + 1].timestamp - imu_peek[i].timestamp;
+                    else if (i > 0)
+                        dt_s = imu_peek[i].timestamp - imu_peek[i - 1].timestamp;
+                    else
+                        dt_s = 0.005;
+                    if (dt_s <= 0.0 || dt_s > 0.1) dt_s = 0.005;
+                    wx += imu_peek[i].ang_vel_x * dt_s;
+                    wy += imu_peek[i].ang_vel_y * dt_s;
+                    wz += imu_peek[i].ang_vel_z * dt_s;
+                    total_dt += dt_s;
+                }
+                // Body frame R
+                cv::Mat rvec_body = (cv::Mat_<double>(3, 1) << wx, wy, wz);
+                cv::Mat R_body;
+                cv::Rodrigues(rvec_body, R_body);
+                // Body → Optical: R_opt = R_b2o * R_body * R_b2o^T
+                static const cv::Mat R_opt_to_body = (cv::Mat_<double>(3, 3) << 0, 0, 1, -1, 0, 0, 0, -1, 0);
+                cv::Mat R_b2o = R_opt_to_body.t();
+                imu_pred.R = R_b2o * R_body * R_opt_to_body;
+                // Acc integration → body translation (subtract gravity, double integrate)
+                double ax_sum = 0, ay_sum = 0, az_sum = 0;
+                for (const auto& s : imu_peek) {
+                    ax_sum += s.lin_acc_x;
+                    ay_sum += s.lin_acc_y;
+                    az_sum += s.lin_acc_z;
+                }
+                double n = static_cast<double>(imu_peek.size());
+                // ROS body: gravity = (0, 0, +9.81) in sensor reading when level
+                cv::Mat a_body = (cv::Mat_<double>(3, 1) <<
+                    ax_sum / n, ay_sum / n, az_sum / n - 9.81);
+                cv::Mat t_body = 0.5 * a_body * total_dt * total_dt;  // meters
+                imu_pred.t = R_b2o * t_body * 1000.0;  // → optical frame, mm
+                imu_pred.valid = true;
+            }
+        }
+
+        auto result = frame_processor_->processFrame(rgb, depth, camera_params_, first_frame_, enable_pose, imu_pred);
 
         // 리소스 모니터링 업데이트
         resource_monitor_->updateProcessingTime(result.feature_detection_time);
@@ -739,6 +799,7 @@ void VisualOdometryNode::processImages(const cv::Mat& rgb, const cv::Mat& depth)
             vo_in.yaw = metrics.pose_yaw;
             vo_in.valid = metrics.pnp_success;  // PnP 실패 시 stale pose → EKF가 position hold
             vo_in.odom_delta = odom_delta;  // Phase 3: T_curr_from_prev (factor_graph용)
+            vo_in.vo_confidence = result.inlier_ratio;  // RANSAC inlier ratio → factor graph noise 조절
 
             RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
                 "IMU buffer: %zu samples drained", imu_samples.size());

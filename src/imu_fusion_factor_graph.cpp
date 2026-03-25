@@ -73,6 +73,33 @@ PoseOutput ImuFusionFactorGraph::fuse(const PoseInput& vo_pose,
         }
         // Phase 5: IMU-VO consistency → adaptive noise
         double noise_scale = impl_->backend.computeImuVoConsistency(delta);
+
+        // ZUPT + IMU-VO 연동: IMU가 정지인데 VO가 큰 motion → VO 거의 무시
+        if (impl_->is_zero_motion) {
+            double vo_motion = std::sqrt(delta.x*delta.x + delta.y*delta.y + delta.z*delta.z);
+            if (vo_motion > 0.005) {  // 5mm 이상 움직임 → 물체 오염
+                noise_scale = std::max(noise_scale, 20.0);
+                RCLCPP_WARN_THROTTLE(logger(), *throttle_clock(), 2000,
+                    "ZUPT+VO conflict: IMU=stationary but VO=%.4fm → noise_scale=%.1f (VO discarded)",
+                    vo_motion, noise_scale);
+            }
+        }
+
+        // Layer 1: RANSAC inlier ratio 기반 VO 신뢰도 (ORB-SLAM3 핵심 방어선)
+        double vo_conf = vo_pose.vo_confidence;
+        if (vo_conf < 0.3) {
+            noise_scale = std::max(noise_scale, 10.0);
+            RCLCPP_WARN_THROTTLE(logger(), *throttle_clock(), 2000,
+                "VO LOW confidence: inlier_ratio=%.2f → noise_scale=%.1f (VO nearly discarded)",
+                vo_conf, noise_scale);
+        } else if (vo_conf < 0.5) {
+            double conf_scale = 1.0 + (0.5 - vo_conf) / 0.2 * 3.0;
+            noise_scale = std::max(noise_scale, conf_scale);
+            RCLCPP_WARN_THROTTLE(logger(), *throttle_clock(), 2000,
+                "VO reduced confidence: inlier_ratio=%.2f → noise_scale=%.1f",
+                vo_conf, noise_scale);
+        }
+
         impl_->backend.addOdometryFactor(idx - 1, idx, delta, noise_scale);
 
         // Phase 3: preintegration 완료 시 CombinedImuFactor 추가

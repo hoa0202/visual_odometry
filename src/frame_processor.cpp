@@ -20,7 +20,8 @@ FrameProcessor::processFrame(const cv::Mat& rgb,
                             const cv::Mat& depth,
                             const CameraParams& camera_params,
                             bool first_frame,
-                            bool enable_pose_estimation) {
+                            bool enable_pose_estimation,
+                            const ImuPredictedPose& imu_pred) {
     ProcessingResult result;
 
     cv::Mat gray = preprocessFrame(rgb);
@@ -43,6 +44,51 @@ FrameProcessor::processFrame(const cv::Mat& rgb,
             camera_params.fx > 0 && camera_params.fy > 0) {
             backprojectAndFilter(result.matches, depth, camera_params, /*use_curr=*/true);
 
+            // Phase 4: IMU-guided feature filtering (OpenVINS chi² gating 변형)
+            // PnP 전에 IMU-predicted pose로 각 feature를 검증, 동적 물체 feature 제거
+            if (imu_pred.valid && !imu_pred.R.empty() && !imu_pred.t.empty() &&
+                result.matches.prev_points_3d.size() >= 10) {
+                cv::Mat K = camera_params.getCameraMatrix();
+                cv::Mat rvec_imu;
+                cv::Rodrigues(imu_pred.R, rvec_imu);
+                std::vector<cv::Point2f> projected;
+                cv::projectPoints(result.matches.prev_points_3d, rvec_imu, imu_pred.t,
+                                  K, cv::noArray(), projected);
+
+                const double reproj_threshold = 5.0;  // pixels
+                std::vector<cv::Point3f> filtered_3d;
+                std::vector<cv::Point2f> filtered_prev;
+                std::vector<cv::Point2f> filtered_curr;
+                std::vector<cv::DMatch> filtered_matches;
+                int removed = 0;
+                for (size_t k = 0; k < projected.size(); ++k) {
+                    double err = cv::norm(projected[k] - result.matches.prev_points[k]);
+                    if (err <= reproj_threshold) {
+                        filtered_3d.push_back(result.matches.prev_points_3d[k]);
+                        filtered_prev.push_back(result.matches.prev_points[k]);
+                        if (k < result.matches.curr_points.size())
+                            filtered_curr.push_back(result.matches.curr_points[k]);
+                        if (k < result.matches.matches.size())
+                            filtered_matches.push_back(result.matches.matches[k]);
+                    } else {
+                        removed++;
+                    }
+                }
+                if (static_cast<int>(filtered_3d.size()) >= 10) {
+                    result.matches.prev_points_3d = filtered_3d;
+                    result.matches.prev_points = filtered_prev;
+                    result.matches.curr_points = filtered_curr;
+                    result.matches.matches = filtered_matches;
+                    auto logger = rclcpp::get_logger("frame_processor");
+                    static auto clock = std::make_shared<rclcpp::Clock>(RCL_STEADY_TIME);
+                    RCLCPP_INFO_THROTTLE(logger, *clock, 2000,
+                        "IMU-guided: removed %d/%zu features (%.1f%%), remaining=%zu",
+                        removed, projected.size(),
+                        100.0 * removed / projected.size(), filtered_3d.size());
+                }
+                // filtered_3d < 10 → fallback: 기존 전체 feature로 PnP
+            }
+
             // PnP: solvePnPRansac
             if (!result.matches.prev_points_3d.empty() &&
                 result.matches.prev_points_3d.size() >= 4) {
@@ -56,6 +102,10 @@ FrameProcessor::processFrame(const cv::Mat& rgb,
                     K, distCoeffs, rvec, tvec,
                     false, 100, 8.0, 0.99, inliers);
                 result.pnp_inliers = static_cast<int>(inliers.size());
+                result.pnp_total_matches = static_cast<int>(result.matches.prev_points_3d.size());
+                result.inlier_ratio = (result.pnp_total_matches > 0)
+                    ? static_cast<double>(result.pnp_inliers) / result.pnp_total_matches
+                    : 0.0;
                 if (result.pnp_success && !rvec.empty() && !tvec.empty()) {
                     cv::Rodrigues(rvec, result.R);
                     result.t = tvec;

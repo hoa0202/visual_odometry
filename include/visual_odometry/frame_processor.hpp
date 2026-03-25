@@ -8,6 +8,13 @@
 
 namespace vo {
 
+/** IMU-predicted relative pose (optical frame, T_prev_from_curr). Phase 4: feature filtering용. */
+struct ImuPredictedPose {
+    cv::Mat R;      // 3x3 rotation (optical frame)
+    cv::Mat t;      // 3x1 translation (optical frame, mm)
+    bool valid{false};
+};
+
 class FrameProcessor {
 public:
     FrameProcessor(std::shared_ptr<FeatureDetector> detector,
@@ -23,6 +30,8 @@ public:
         // PnP 결과 (curr→prev)
         bool pnp_success{false};
         int pnp_inliers{0};
+        int pnp_total_matches{0};   // RANSAC 입력 총 매칭 수
+        double inlier_ratio{0.0};   // inliers / total (0.0~1.0)
         cv::Mat R;  // 3x3
         cv::Mat t;  // 3x1
     };
@@ -31,7 +40,8 @@ public:
                                 const cv::Mat& depth,
                                 const CameraParams& camera_params,
                                 bool first_frame = false,
-                                bool enable_pose_estimation = true);
+                                bool enable_pose_estimation = true,
+                                const ImuPredictedPose& imu_pred = {});
 
     void setPreviousFrame(const cv::Mat& frame, const cv::Mat& depth,
                          const Features& features);

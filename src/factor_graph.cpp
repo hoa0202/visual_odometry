@@ -138,8 +138,11 @@ void FactorGraphBackend::addOdometryFactor(size_t i, size_t j,
                                  0.15 * noise_scale, 0.15 * noise_scale, 0.15 * noise_scale).finished());
     }
 
+    // Huber robust kernel: outlier 프레임의 영향을 자연스럽게 감쇠 (ORB-SLAM3 표준)
+    auto robust_noise = gtsam::noiseModel::Robust::Create(
+        gtsam::noiseModel::mEstimator::Huber::Create(0.5), noise);
     impl_->graph.add(gtsam::BetweenFactor<gtsam::Pose3>(
-        key_i, key_j, measured, noise));
+        key_i, key_j, measured, robust_noise));
 }
 
 double FactorGraphBackend::computeImuVoConsistency(const DeltaPose& vo_delta) const {
@@ -155,33 +158,30 @@ double FactorGraphBackend::computeImuVoConsistency(const DeltaPose& vo_delta) co
     gtsam::Vector3 imu_dp = predicted.pose().translation();
     gtsam::Vector3 imu_dr = predicted.pose().rotation().rpy();
 
-    // VO delta
-    double vo_pos_norm = std::sqrt(vo_delta.x * vo_delta.x +
-                                    vo_delta.y * vo_delta.y +
-                                    vo_delta.z * vo_delta.z);
-    double imu_pos_norm = imu_dp.norm();
+    // VO delta를 벡터로 비교 (크기뿐 아니라 방향 불일치도 감지)
+    gtsam::Vector3 vo_dp(vo_delta.x, vo_delta.y, vo_delta.z);
 
-    // 위치 불일치: VO가 IMU보다 훨씬 크게 움직인다고 판단 → 움직이는 물체 오염
-    double pos_diff = std::abs(vo_pos_norm - imu_pos_norm);
+    // 위치 불일치: 벡터 차이 (방향 + 크기 모두 반영)
+    double pos_diff = (vo_dp - imu_dp).norm();
     // 회전 불일치
     double rot_diff = std::sqrt(
         (vo_delta.roll - imu_dr(0)) * (vo_delta.roll - imu_dr(0)) +
         (vo_delta.pitch - imu_dr(1)) * (vo_delta.pitch - imu_dr(1)) +
         (vo_delta.yaw - imu_dr(2)) * (vo_delta.yaw - imu_dr(2)));
 
-    // noise_scale: 불일치에 비례 (최소 1.0, 최대 10.0)
-    // pos_diff > 0.05m 또는 rot_diff > 0.1rad 부터 inflate 시작
-    double pos_score = std::max(0.0, (pos_diff - 0.05) / 0.1);  // 0.05m 데드존, 0.1m당 1x
-    double rot_score = std::max(0.0, (rot_diff - 0.1) / 0.2);   // 0.1rad 데드존, 0.2rad당 1x
-    double score = 1.0 + std::max(pos_score, rot_score) * 3.0;
-    score = std::min(score, 10.0);
+    // noise_scale: 불일치에 비례 (최소 1.0, 최대 20.0)
+    // pos_diff > 0.01m 또는 rot_diff > 0.03rad 부터 inflate 시작
+    double pos_score = std::max(0.0, (pos_diff - 0.01) / 0.02);  // 0.01m 데드존, 0.02m당 1x
+    double rot_score = std::max(0.0, (rot_diff - 0.03) / 0.05);  // 0.03rad 데드존, 0.05rad당 1x
+    double score = 1.0 + std::max(pos_score, rot_score) * 8.0;
+    score = std::min(score, 20.0);
 
     if (score > 1.5) {
         auto logger = rclcpp::get_logger("factor_graph");
         static auto clock = std::make_shared<rclcpp::Clock>(RCL_STEADY_TIME);
         RCLCPP_WARN_THROTTLE(logger, *clock, 2000,
-            "IMU-VO inconsistency: vo_pos=%.4f imu_pos=%.4f rot_diff=%.3f → noise_scale=%.1f",
-            vo_pos_norm, imu_pos_norm, rot_diff, score);
+            "IMU-VO inconsistency: pos_diff=%.4f(vo=%.4f imu=%.4f) rot_diff=%.3f → noise_scale=%.1f",
+            pos_diff, vo_dp.norm(), imu_dp.norm(), rot_diff, score);
     }
 
     return score;

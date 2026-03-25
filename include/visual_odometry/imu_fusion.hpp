@@ -36,6 +36,8 @@ struct PoseInput {
     bool valid{false};
     /** PnP T_prev_from_curr in body frame (GTSAM Between measured). factor_graph만 사용. */
     RelPose odom_delta;
+    /** RANSAC inlier ratio (0.0~1.0). 낮을수록 동적 물체 오염 가능성 높음. */
+    double vo_confidence{1.0};
 };
 
 /** Fused pose output */
