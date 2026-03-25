@@ -215,14 +215,27 @@ PoseOutput FactorGraphBackend::optimize() {
         impl_->initial.clear();
         const size_t n_old = impl_->next_idx;
 
-        // 최적화된 velocity/bias 저장 (slide 후 재사용)
+        // 최적화된 velocity/bias 저장 (slide 후 재사용) + clamp
         gtsam::Key last_vel_old = gtsam::Symbol('v', static_cast<gtsam::Key>(n_old - 1));
         gtsam::Key last_bias_old = gtsam::Symbol('b', static_cast<gtsam::Key>(n_old - 1));
         if (old_result.exists(last_vel_old)) {
             impl_->prev_velocity = old_result.at<gtsam::Vector3>(last_vel_old);
+            static constexpr double kMaxVel = 3.0;
+            for (int a = 0; a < 3; ++a)
+                impl_->prev_velocity(a) = std::max(-kMaxVel, std::min(kMaxVel, impl_->prev_velocity(a)));
         }
         if (old_result.exists(last_bias_old)) {
-            impl_->prev_bias = old_result.at<gtsam::imuBias::ConstantBias>(last_bias_old);
+            auto old_bias = old_result.at<gtsam::imuBias::ConstantBias>(last_bias_old);
+            // CRITICAL: sliding window에서도 bias clamp 적용 (이전 버그: 미적용으로 bias 발산)
+            static constexpr double kMaxGyroBias = 0.05;
+            static constexpr double kMaxAccelBias = 0.5;
+            gtsam::Vector3 bg = old_bias.gyroscope();
+            gtsam::Vector3 ba = old_bias.accelerometer();
+            for (int a = 0; a < 3; ++a) {
+                bg(a) = std::max(-kMaxGyroBias, std::min(kMaxGyroBias, bg(a)));
+                ba(a) = std::max(-kMaxAccelBias, std::min(kMaxAccelBias, ba(a)));
+            }
+            impl_->prev_bias = gtsam::imuBias::ConstantBias(ba, bg);
         }
 
         for (size_t k = 1; k < n_old; ++k) {
@@ -283,12 +296,14 @@ PoseOutput FactorGraphBackend::optimize() {
         }
     }
     if (result.exists(last_bias)) {
-        auto new_bias = result.at<gtsam::imuBias::ConstantBias>(last_bias);
-        // bias clamp: BMI088 realistic range (gyro ±0.05 rad/s, accel ±0.5 m/s²)
-        static constexpr double kMaxGyroBias = 0.05;   // rad/s
+        impl_->prev_bias = result.at<gtsam::imuBias::ConstantBias>(last_bias);
+    }
+    // ALWAYS clamp bias (sliding window 경로에서 bias node가 last_idx에 없을 수 있음)
+    {
+        static constexpr double kMaxGyroBias = 0.05;   // rad/s (BMI088 realistic)
         static constexpr double kMaxAccelBias = 0.5;    // m/s²
-        gtsam::Vector3 bg = new_bias.gyroscope();
-        gtsam::Vector3 ba = new_bias.accelerometer();
+        gtsam::Vector3 bg = impl_->prev_bias.gyroscope();
+        gtsam::Vector3 ba = impl_->prev_bias.accelerometer();
         for (int a = 0; a < 3; ++a) {
             bg(a) = std::max(-kMaxGyroBias, std::min(kMaxGyroBias, bg(a)));
             ba(a) = std::max(-kMaxAccelBias, std::min(kMaxAccelBias, ba(a)));
