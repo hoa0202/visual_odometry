@@ -11,7 +11,8 @@ namespace vo {
 /** IMU-predicted relative pose (optical frame, T_prev_from_curr). Phase 4: feature filtering용. */
 struct ImuPredictedPose {
     cv::Mat R;      // 3x3 rotation (optical frame)
-    cv::Mat t;      // 3x1 translation (optical frame, mm)
+    cv::Mat t;      // 3x1 translation (optical frame, mm) — rotation-only 모드에서 zero
+    double angular_rate{0.0};  // rad/s — adaptive threshold 용
     bool valid{false};
 };
 
@@ -54,6 +55,7 @@ private:
     cv::Mat prev_frame_gray_;
     cv::Mat prev_depth_;
     Features prev_features_;
+    std::vector<int> prev_track_ages_;  // Phase 5: keypoint별 연속 추적 프레임 수
 
     void backprojectAndFilter(FeatureMatches& matches,
                               const cv::Mat& depth,

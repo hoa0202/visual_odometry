@@ -179,6 +179,8 @@ private:
 
     // 포즈 누적 (frame0 기준 카메라 pose)
     cv::Mat T_global_;  // 4x4, 초기값 I
+    // 이전 프레임 VO delta (constant velocity model용, optical frame, mm)
+    cv::Mat prev_vo_t_;  // 3x1, 이전 프레임의 PnP translation
 
     // IMU-VO fusion
     std::unique_ptr<ImuFusionBase> imu_fusion_;

@@ -554,19 +554,28 @@ ZED sensor 토픽과 호환되도록 설정됨.
    - [x] 4.6 검증: `IMU-guided: removed N/M features` 로그 + 이동 중 드리프트 감소
      - 테스트 결과: 동적 물체 feature 49~94% 제거, 이동 중 드리프트 개선 확인
 
-   **Phase 5: Multi-view consistency** (중급, 선택)
-   - [ ] 5.1 N 프레임 이상 추적된 feature만 PnP에 사용
-   - [ ] 5.2 짧게 나타났다 사라지는 feature (동적 물체) 자동 필터
+   **Phase 5: Multi-view consistency** (동적 물체 핵심 방어) 🔧 구현 중
+   > 원리: 동적 물체의 feature는 RANSAC을 연속 N프레임 통과하기 어려움 → track이 짧음.
+   > N프레임 이상 연속 추적된 feature만 PnP에 사용하면 동적 물체 feature 자연 제거.
+   > ORB-SLAM3의 map point culling과 동일 접근 (관측 횟수 < threshold → 삭제).
+
+   - [ ] 5.1 `prev_track_ages_` 멤버: keypoint별 연속 추적 프레임 수 저장
+   - [ ] 5.2 매칭 후 age 계산: `curr_age[trainIdx] = prev_age[queryIdx] + 1`
+   - [ ] 5.3 age >= min_track_length(3) feature만 PnP에 사용
+   - [ ] 5.4 mature feature < 50개면 fallback (filtering 비활성)
+   - [ ] 5.5 로그: `multi-view: N mature / M total, removed K short-track`
+   - [ ] 5.6 검증: 이동 중 동적 물체 앞에서 드리프트 감소 확인
 
    **Phase 6: Semantic masking** (고급, 후순위)
    - [ ] 6.1 경량 segmentation (MobileNet/YOLO)으로 사람/차량 마스크
    - [ ] 6.2 마스크 영역 feature 추출 제외
 
    > **비교표: 대표 시스템 vs 우리 시스템 (현재 → 목표)**
-   > | 방어 계층 | OpenVINS | ORB-SLAM3 | RTAB-Map | 우리 (현재) | 우리 (Phase 4 후) |
+   > | 방어 계층 | OpenVINS | ORB-SLAM3 | RTAB-Map | 우리 (현재) | 우리 (Phase 5 후) |
    > |-----------|----------|-----------|----------|------------|------------------|
    > | RANSAC PnP | ✅ | ✅ | ✅ | ✅ | ✅ |
-   > | IMU-guided filtering | ✅ chi² | ❌ | ❌ | ✅ Phase 4 완료 | ✅ |
+   > | IMU-guided filtering | ✅ chi² | ❌ | ❌ | ✅ Phase 4 | ✅ |
+   > | Multi-view consistency | ❌ | ✅ (map point culling) | ✅ | ❌ | ✅ Phase 5 |
    > | Robust kernel | ❌ | ✅ (Huber) | ❌ | ✅ | ✅ |
    > | IMU-VO noise 조절 | ❌ | ❌ | ❌ | ✅ | ✅ |
    > | Multi-round BA | ❌ | ✅ | ✅ | ❌ | ❌ |

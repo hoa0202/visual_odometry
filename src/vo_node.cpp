@@ -643,19 +643,14 @@ void VisualOdometryNode::processImages(const cv::Mat& rgb, const cv::Mat& depth)
                 static const cv::Mat R_opt_to_body = (cv::Mat_<double>(3, 3) << 0, 0, 1, -1, 0, 0, 0, -1, 0);
                 cv::Mat R_b2o = R_opt_to_body.t();
                 imu_pred.R = R_b2o * R_body * R_opt_to_body;
-                // Acc integration → body translation (subtract gravity, double integrate)
-                double ax_sum = 0, ay_sum = 0, az_sum = 0;
-                for (const auto& s : imu_peek) {
-                    ax_sum += s.lin_acc_x;
-                    ay_sum += s.lin_acc_y;
-                    az_sum += s.lin_acc_z;
+                // Translation: 이전 VO delta 사용 (constant velocity model)
+                // acc double-integration은 33ms에서 부정확, 이전 VO delta가 더 신뢰
+                if (!prev_vo_t_.empty()) {
+                    imu_pred.t = prev_vo_t_.clone();  // optical frame, mm
+                } else {
+                    imu_pred.t = cv::Mat::zeros(3, 1, CV_64F);
                 }
-                double n = static_cast<double>(imu_peek.size());
-                // ROS body: gravity = (0, 0, +9.81) in sensor reading when level
-                cv::Mat a_body = (cv::Mat_<double>(3, 1) <<
-                    ax_sum / n, ay_sum / n, az_sum / n - 9.81);
-                cv::Mat t_body = 0.5 * a_body * total_dt * total_dt;  // meters
-                imu_pred.t = R_b2o * t_body * 1000.0;  // → optical frame, mm
+                imu_pred.angular_rate = cv::norm(rvec_body) / std::max(total_dt, 0.001);
                 imu_pred.valid = true;
             }
         }
@@ -684,6 +679,7 @@ void VisualOdometryNode::processImages(const cv::Mat& rgb, const cv::Mat& depth)
         // odom_delta: T_prev_from_curr (body) for factor_graph Between factor. GTSAM between(i,j)=T_i_from_j.
         RelPose odom_delta;
         if (enable_pose && result.pnp_success && !result.R.empty() && !result.t.empty()) {
+            prev_vo_t_ = result.t.clone();  // 다음 프레임의 constant velocity prediction용
             cv::Mat R_cp = result.R, t_cp = result.t;  // T_prev_from_curr (optical, t mm)
             double t_norm = cv::norm(t_cp);
             double trace_R = R_cp.at<double>(0,0) + R_cp.at<double>(1,1) + R_cp.at<double>(2,2);
