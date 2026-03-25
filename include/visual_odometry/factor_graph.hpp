@@ -80,6 +80,11 @@ public:
      *  VO 드리프트를 IMU로 억제. */
     void addZeroVelocityConstraint(size_t i);
 
+    /** GTSAM preintegration 기반 IMU prediction (bias-corrected).
+     *  별도 temp PIM으로 body-frame IMU 샘플 적분 → deltaR, predict(velocity) → deltaP.
+     *  factor graph의 prev_bias 사용으로 raw gyro보다 정확. */
+    ImuPrediction predictFromImu(const std::vector<ImuData>& body_frame_samples) const;
+
     /** IMU 샘플로 정지 상태 판별.
      *  gyro < threshold && accel ≈ gravity → true. */
     static bool detectZeroMotion(const std::vector<ImuData>& imu_samples,

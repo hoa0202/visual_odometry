@@ -619,39 +619,62 @@ void VisualOdometryNode::processImages(const cv::Mat& rgb, const cv::Mat& depth)
                     s.lin_acc_x = az;  s.lin_acc_y = -ax; s.lin_acc_z = -ay;
                     s.ang_vel_x = gz;  s.ang_vel_y = -gx; s.ang_vel_z = -gy;
                 }
-                // Gyro integration → body frame rotation delta
-                double wx = 0, wy = 0, wz = 0, total_dt = 0;
-                for (size_t i = 0; i < imu_peek.size(); ++i) {
-                    double dt_s;
-                    if (i + 1 < imu_peek.size())
-                        dt_s = imu_peek[i + 1].timestamp - imu_peek[i].timestamp;
-                    else if (i > 0)
-                        dt_s = imu_peek[i].timestamp - imu_peek[i - 1].timestamp;
-                    else
-                        dt_s = 0.005;
-                    if (dt_s <= 0.0 || dt_s > 0.1) dt_s = 0.005;
-                    wx += imu_peek[i].ang_vel_x * dt_s;
-                    wy += imu_peek[i].ang_vel_y * dt_s;
-                    wz += imu_peek[i].ang_vel_z * dt_s;
-                    total_dt += dt_s;
-                }
-                // Body frame R
-                cv::Mat rvec_body = (cv::Mat_<double>(3, 1) << wx, wy, wz);
-                cv::Mat R_body;
-                cv::Rodrigues(rvec_body, R_body);
-                // Body → Optical: R_opt = R_b2o * R_body * R_b2o^T
-                static const cv::Mat R_opt_to_body = (cv::Mat_<double>(3, 3) << 0, 0, 1, -1, 0, 0, 0, -1, 0);
-                cv::Mat R_b2o = R_opt_to_body.t();
-                imu_pred.R = R_b2o * R_body * R_opt_to_body;
-                // Translation: 이전 VO delta 사용 (constant velocity model)
-                // acc double-integration은 33ms에서 부정확, 이전 VO delta가 더 신뢰
-                if (!prev_vo_t_.empty()) {
-                    imu_pred.t = prev_vo_t_.clone();  // optical frame, mm
+                // GTSAM preintegration 기반 prediction (bias-corrected, proper SO(3))
+                ImuPrediction gtsam_pred = imu_fusion_->predictFromImu(imu_peek);
+                if (gtsam_pred.valid) {
+                    // Body R (row-major double[9]) → cv::Mat
+                    cv::Mat R_body(3, 3, CV_64F);
+                    for (int r = 0; r < 3; r++)
+                        for (int c = 0; c < 3; c++)
+                            R_body.at<double>(r, c) = gtsam_pred.R[r * 3 + c];
+                    // Body → Optical: R_opt = R_b2o * R_body * R_opt_to_body
+                    static const cv::Mat R_opt_to_body = (cv::Mat_<double>(3, 3) << 0, 0, 1, -1, 0, 0, 0, -1, 0);
+                    cv::Mat R_b2o = R_opt_to_body.t();
+                    imu_pred.R = R_b2o * R_body * R_opt_to_body;
+                    // Translation: PIM predict (velocity-based, body frame m) → optical frame mm
+                    cv::Mat t_body = (cv::Mat_<double>(3, 1) <<
+                        gtsam_pred.tx, gtsam_pred.ty, gtsam_pred.tz);
+                    cv::Mat t_opt = R_b2o * t_body * 1000.0;  // body m → optical mm
+                    // Fallback: PIM translation이 불안정할 수 있으므로 prev_vo_t_와 blend
+                    if (!prev_vo_t_.empty() && cv::norm(t_opt) < 1.0) {
+                        // PIM translation이 거의 0이면 constant velocity 사용
+                        imu_pred.t = prev_vo_t_.clone();
+                    } else {
+                        imu_pred.t = t_opt;
+                    }
+                    imu_pred.angular_rate = gtsam_pred.angular_rate;
+                    imu_pred.valid = true;
                 } else {
-                    imu_pred.t = cv::Mat::zeros(3, 1, CV_64F);
+                    // Fallback: raw gyro integration (GTSAM 아직 ready 아닐 때)
+                    double wx = 0, wy = 0, wz = 0, total_dt = 0;
+                    for (size_t i = 0; i < imu_peek.size(); ++i) {
+                        double dt_s;
+                        if (i + 1 < imu_peek.size())
+                            dt_s = imu_peek[i + 1].timestamp - imu_peek[i].timestamp;
+                        else if (i > 0)
+                            dt_s = imu_peek[i].timestamp - imu_peek[i - 1].timestamp;
+                        else
+                            dt_s = 0.005;
+                        if (dt_s <= 0.0 || dt_s > 0.1) dt_s = 0.005;
+                        wx += imu_peek[i].ang_vel_x * dt_s;
+                        wy += imu_peek[i].ang_vel_y * dt_s;
+                        wz += imu_peek[i].ang_vel_z * dt_s;
+                        total_dt += dt_s;
+                    }
+                    cv::Mat rvec_body = (cv::Mat_<double>(3, 1) << wx, wy, wz);
+                    cv::Mat R_body;
+                    cv::Rodrigues(rvec_body, R_body);
+                    static const cv::Mat R_opt_to_body = (cv::Mat_<double>(3, 3) << 0, 0, 1, -1, 0, 0, 0, -1, 0);
+                    cv::Mat R_b2o = R_opt_to_body.t();
+                    imu_pred.R = R_b2o * R_body * R_opt_to_body;
+                    if (!prev_vo_t_.empty()) {
+                        imu_pred.t = prev_vo_t_.clone();
+                    } else {
+                        imu_pred.t = cv::Mat::zeros(3, 1, CV_64F);
+                    }
+                    imu_pred.angular_rate = cv::norm(rvec_body) / std::max(total_dt, 0.001);
+                    imu_pred.valid = true;
                 }
-                imu_pred.angular_rate = cv::norm(rvec_body) / std::max(total_dt, 0.001);
-                imu_pred.valid = true;
             }
         }
 

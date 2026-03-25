@@ -168,6 +168,11 @@ PoseOutput ImuFusionFactorGraph::fuse(const PoseInput& vo_pose, const ImuData& i
     return fuse(vo_pose, imu, dt_sec);
 }
 
+ImuPrediction ImuFusionFactorGraph::predictFromImu(
+    const std::vector<ImuData>& body_frame_samples) {
+    return impl_->backend.predictFromImu(body_frame_samples);
+}
+
 void ImuFusionFactorGraph::reset() {
     impl_->backend.reset();
     impl_->has_prev = false;

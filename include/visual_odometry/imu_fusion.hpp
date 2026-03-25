@@ -5,7 +5,17 @@
 #include <string>
 #include <vector>
 
+
 namespace vo {
+
+/** GTSAM preintegration 기반 IMU prediction 결과 (body frame) */
+struct ImuPrediction {
+    double R[9]{1,0,0, 0,1,0, 0,0,1};  // 3x3 row-major rotation delta (body frame)
+    double tx{0}, ty{0}, tz{0};          // translation delta (body frame, m) — PIM predict w/ velocity
+    double angular_rate{0};              // rad/s — adaptive threshold용
+    double total_dt{0};                  // integration time (sec)
+    bool valid{false};
+};
 
 /** EKF robust params (Chi-squared gating + Huber) - VINS/ORB-SLAM 계열 표준 */
 struct EKFParams {
@@ -58,6 +68,12 @@ public:
         return fuse(vo_pose, imu, dt_sec);
     }
     virtual void reset() = 0;
+    /** GTSAM preintegration 기반 IMU prediction (bias-corrected rotation + velocity-based translation).
+     *  body_frame_samples: ROS body frame IMU 데이터. factor_graph 모드에서만 유효. */
+    virtual ImuPrediction predictFromImu(const std::vector<ImuData>& body_frame_samples) {
+        (void)body_frame_samples;
+        return {};  // default: no prediction (complementary/EKF)
+    }
 };
 
 /** Complementary filter: roll/pitch from IMU (accel+gyro), yaw/pos from VO */
@@ -121,6 +137,7 @@ public:
     PoseOutput fuse(const PoseInput& vo_pose, const ImuData& imu, double dt_sec,
                     const std::vector<ImuData>& imu_samples) override;
     void reset() override;
+    ImuPrediction predictFromImu(const std::vector<ImuData>& body_frame_samples) override;
 
 private:
     struct Impl;

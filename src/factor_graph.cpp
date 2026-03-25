@@ -451,6 +451,69 @@ void FactorGraphBackend::addZeroVelocityConstraint(size_t i) {
         "ZUPT: zero-velocity constraint at pose %zu", i);
 }
 
+ImuPrediction FactorGraphBackend::predictFromImu(
+    const std::vector<ImuData>& body_samples) const {
+    ImuPrediction pred;
+    if (!impl_->imu_ready || !impl_->imu_params || body_samples.size() < 2) {
+        return pred;
+    }
+
+    // Temp PIM with current bias (bias-corrected integration)
+    gtsam::PreintegratedCombinedMeasurements temp_pim(impl_->imu_params, impl_->prev_bias);
+
+    for (size_t i = 0; i < body_samples.size(); ++i) {
+        const auto& s = body_samples[i];
+        gtsam::Vector3 acc(s.lin_acc_x, s.lin_acc_y, s.lin_acc_z);
+        gtsam::Vector3 gyro(s.ang_vel_x, s.ang_vel_y, s.ang_vel_z);
+        double dt;
+        if (i + 1 < body_samples.size())
+            dt = body_samples[i + 1].timestamp - s.timestamp;
+        else if (i > 0)
+            dt = s.timestamp - body_samples[i - 1].timestamp;
+        else
+            dt = 0.005;
+        if (dt <= 0.0 || dt > 0.1) dt = 0.005;
+        temp_pim.integrateMeasurement(acc, gyro, dt);
+    }
+
+    if (temp_pim.deltaTij() < 1e-6) return pred;
+
+    // Rotation delta (bias-corrected)
+    gtsam::Rot3 deltaR = temp_pim.deltaRij();
+    gtsam::Matrix3 R_mat = deltaR.matrix();
+    for (int r = 0; r < 3; r++)
+        for (int c = 0; c < 3; c++)
+            pred.R[r * 3 + c] = R_mat(r, c);
+
+    // Translation from predict (uses velocity + bias-corrected accel)
+    gtsam::NavState prev_state(gtsam::Pose3(), impl_->prev_velocity);
+    gtsam::NavState predicted = temp_pim.predict(prev_state, impl_->prev_bias);
+    gtsam::Point3 dp = predicted.pose().translation();
+    pred.tx = dp.x();
+    pred.ty = dp.y();
+    pred.tz = dp.z();
+
+    // Angular rate from rotation angle
+    gtsam::Vector3 logR = gtsam::Rot3::Logmap(deltaR);
+    pred.angular_rate = logR.norm() / std::max(temp_pim.deltaTij(), 0.001);
+    pred.total_dt = temp_pim.deltaTij();
+    pred.valid = true;
+
+    auto logger = rclcpp::get_logger("factor_graph");
+    static auto clock = std::make_shared<rclcpp::Clock>(RCL_STEADY_TIME);
+    RCLCPP_INFO_THROTTLE(logger, *clock, 5000,
+        "IMU predict: dt=%.3f rot=%.3fdeg t=(%.4f,%.4f,%.4f)m ang_rate=%.2frad/s bias_g=(%.4f,%.4f,%.4f)",
+        pred.total_dt,
+        logR.norm() * 180.0 / M_PI,
+        pred.tx, pred.ty, pred.tz,
+        pred.angular_rate,
+        impl_->prev_bias.gyroscope().x(),
+        impl_->prev_bias.gyroscope().y(),
+        impl_->prev_bias.gyroscope().z());
+
+    return pred;
+}
+
 bool FactorGraphBackend::detectZeroMotion(const std::vector<ImuData>& imu_samples,
                                            double gyro_threshold,
                                            double accel_var_threshold) {
