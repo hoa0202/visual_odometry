@@ -10,8 +10,8 @@ namespace vo {
 struct ImuPreintegrationParams {
     double accel_noise_sigma{0.05};       // m/s²/√Hz
     double gyro_noise_sigma{0.005};       // rad/s/√Hz
-    double accel_bias_rw_sigma{0.001};    // m/s³/√Hz (bias random walk)
-    double gyro_bias_rw_sigma{0.0001};    // rad/s²/√Hz
+    double accel_bias_rw_sigma{0.0005};   // m/s³/√Hz (bias random walk, tighter)
+    double gyro_bias_rw_sigma{0.00005};   // rad/s²/√Hz (bias 변동 억제)
     double gravity{9.81};                 // m/s² (Z-up, ROS convention)
 };
 

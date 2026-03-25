@@ -90,8 +90,9 @@ struct FactorGraphBackend::Impl {
             (gtsam::Vector(6) << 0.08, 0.08, 0.08, 0.15, 0.15, 0.15).finished());
         // velocity prior: 정지 시작 가정, 넉넉한 sigma
         vel_prior_noise = gtsam::noiseModel::Isotropic::Sigma(3, 0.5);  // m/s
-        // bias prior: zero bias 가정, 넉넉한 sigma
-        bias_prior_noise = gtsam::noiseModel::Isotropic::Sigma(6, 0.1);
+        // bias prior: zero bias 가정, 타이트한 sigma (BMI088 typical bias ~0.01 rad/s)
+        // 0.01 → bias가 ±0.03 rad/s (3σ) 이내로 제한 — 0.1은 너무 느슨하여 VO 오차를 bias로 흡수
+        bias_prior_noise = gtsam::noiseModel::Isotropic::Sigma(6, 0.01);
     }
 };
 
@@ -282,7 +283,17 @@ PoseOutput FactorGraphBackend::optimize() {
         }
     }
     if (result.exists(last_bias)) {
-        impl_->prev_bias = result.at<gtsam::imuBias::ConstantBias>(last_bias);
+        auto new_bias = result.at<gtsam::imuBias::ConstantBias>(last_bias);
+        // bias clamp: BMI088 realistic range (gyro ±0.05 rad/s, accel ±0.5 m/s²)
+        static constexpr double kMaxGyroBias = 0.05;   // rad/s
+        static constexpr double kMaxAccelBias = 0.5;    // m/s²
+        gtsam::Vector3 bg = new_bias.gyroscope();
+        gtsam::Vector3 ba = new_bias.accelerometer();
+        for (int a = 0; a < 3; ++a) {
+            bg(a) = std::max(-kMaxGyroBias, std::min(kMaxGyroBias, bg(a)));
+            ba(a) = std::max(-kMaxAccelBias, std::min(kMaxAccelBias, ba(a)));
+        }
+        impl_->prev_bias = gtsam::imuBias::ConstantBias(ba, bg);
     }
     return out;
 }
