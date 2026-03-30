@@ -6,12 +6,25 @@
 
 namespace vo {
 
+// Legacy: descriptor matching 모드
 FrameProcessor::FrameProcessor(std::shared_ptr<FeatureDetector> detector,
                              std::shared_ptr<FeatureMatcher> matcher)
     : feature_detector_(detector)
-    , feature_matcher_(matcher) {
+    , feature_matcher_(matcher)
+    , use_klt_(false) {
     if (!detector || !matcher) {
         throw std::runtime_error("Null detector or matcher");
+    }
+}
+
+// KLT tracker 모드
+FrameProcessor::FrameProcessor(std::shared_ptr<FeatureDetector> detector,
+                             std::shared_ptr<FeatureTracker> tracker)
+    : feature_detector_(detector)
+    , feature_tracker_(tracker)
+    , use_klt_(true) {
+    if (!detector || !tracker) {
+        throw std::runtime_error("Null detector or tracker");
     }
 }
 
@@ -22,6 +35,233 @@ FrameProcessor::processFrame(const cv::Mat& rgb,
                             bool first_frame,
                             bool enable_pose_estimation,
                             const ImuPredictedPose& imu_pred) {
+    if (use_klt_) {
+        return processFrameKLT(rgb, depth, camera_params, first_frame,
+                               enable_pose_estimation, imu_pred);
+    }
+    return processFrameDescriptor(rgb, depth, camera_params, first_frame,
+                                  enable_pose_estimation, imu_pred);
+}
+
+// ─── KLT Tracker 모드 ───────────────────────────────────────────────────────
+
+FrameProcessor::ProcessingResult
+FrameProcessor::processFrameKLT(const cv::Mat& rgb,
+                                const cv::Mat& depth,
+                                const CameraParams& camera_params,
+                                bool first_frame,
+                                bool enable_pose_estimation,
+                                const ImuPredictedPose& imu_pred) {
+    ProcessingResult result;
+
+    cv::Mat gray = preprocessFrame(rgb);
+
+    if (first_frame || prev_frame_gray_.empty()) {
+        feature_tracker_->initialize(gray);
+        result.features = detectFeatures(gray);
+        setPreviousFrame(rgb, depth, result.features);
+        return result;
+    }
+
+    // KLT tracking (IMU-guided when available)
+    auto track_start = std::chrono::steady_clock::now();
+    FeatureTracker::TrackingResult track_result;
+    if (imu_pred.valid && !imu_pred.R.empty() && camera_params.fx > 0) {
+        track_result = feature_tracker_->track(
+            gray, imu_pred.R, camera_params.fx, camera_params.fy,
+            camera_params.cx, camera_params.cy);
+    } else {
+        track_result = feature_tracker_->track(gray);
+    }
+    result.feature_matching_time = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - track_start).count();
+
+    result.matches = track_result.matches;
+    result.track_ages = track_result.track_ages;
+
+    // Keyframe 생성용: filtering 전 원본 보존
+    result.klt_curr_points = track_result.matches.curr_points;
+    result.klt_track_ids = track_result.track_ids;
+
+    auto logger = rclcpp::get_logger("frame_processor");
+    static auto klt_clock = std::make_shared<rclcpp::Clock>(RCL_STEADY_TIME);
+    RCLCPP_INFO_THROTTLE(logger, *klt_clock, 3000,
+        "KLT: tracked=%d, new=%d, fb_rejected=%d, matches=%zu",
+        track_result.total_tracked, track_result.new_detected,
+        track_result.fb_rejected, result.matches.prev_points.size());
+
+    // PnP pose estimation
+    if (enable_pose_estimation && !result.matches.empty() &&
+        camera_params.fx > 0 && camera_params.fy > 0) {
+
+        // === ORB-SLAM3 2-Stage Tracking ===
+        //
+        // Stage 1: TrackWithMotionModel — frame-to-frame depth PnP → rough pose
+        //   KLT already tracked features. Backproject curr depth → 3D.
+        //   solvePnP → T_prev_from_curr → T_rough = T_prev * T_rel (accurate absolute pose)
+        //
+        // Stage 2: TrackLocalMap — project map points with rough pose → tight matching
+        //   T_rough로 map point project (3px radius) → 수백 개 매칭
+        //   solvePnP with map points → final accurate absolute pose
+
+        bool map_pnp_done = false;
+        cv::Mat T_rough;  // Stage 1 결과: rough absolute pose
+
+        // --- Stage 1: TrackWithMotionModel (frame-to-frame depth PnP) ---
+        if (!depth.empty() && !result.matches.empty()) {
+            backprojectAndFilter(result.matches, depth, camera_params, /*use_curr=*/true);
+
+            // PnP: frame-to-frame
+            if (!result.matches.prev_points_3d.empty() &&
+                result.matches.prev_points_3d.size() >= 4) {
+                cv::Mat K = camera_params.getCameraMatrix();
+                cv::Mat distCoeffs = cv::Mat::zeros(4, 1, CV_64F);
+                cv::Mat rvec, tvec;
+                std::vector<int> inliers;
+
+                // 1차: RANSAC
+                result.pnp_success = cv::solvePnPRansac(
+                    result.matches.prev_points_3d,
+                    result.matches.prev_points,
+                    K, distCoeffs, rvec, tvec,
+                    false, 200, 6.0, 0.99, inliers);
+
+                // 2차: inlier만으로 iterative refinement
+                if (result.pnp_success && static_cast<int>(inliers.size()) >= 8) {
+                    std::vector<cv::Point3f> inlier_3d;
+                    std::vector<cv::Point2f> inlier_2d;
+                    for (int idx : inliers) {
+                        inlier_3d.push_back(result.matches.prev_points_3d[idx]);
+                        inlier_2d.push_back(result.matches.prev_points[idx]);
+                    }
+                    cv::solvePnP(inlier_3d, inlier_2d, K, distCoeffs,
+                                 rvec, tvec, true, cv::SOLVEPNP_ITERATIVE);
+                }
+
+                result.pnp_inliers = static_cast<int>(inliers.size());
+                result.pnp_total_matches = static_cast<int>(result.matches.prev_points_3d.size());
+                result.inlier_ratio = (result.pnp_total_matches > 0)
+                    ? static_cast<double>(result.pnp_inliers) / result.pnp_total_matches
+                    : 0.0;
+                if (result.pnp_success && !rvec.empty() && !tvec.empty()) {
+                    cv::Rodrigues(rvec, result.R);
+                    result.t = tvec;
+                    result.use_map_pnp = false;
+
+                    // Stage 1 결과 → rough absolute pose (T_world_from_camera)
+                    // T_rel = T_prev_from_curr → T_rough = T_prev * T_rel
+                    if (has_prev_pose_ && !prev_rvec_cw_.empty()) {
+                        cv::Mat R_cw_prev;
+                        cv::Rodrigues(prev_rvec_cw_, R_cw_prev);
+                        cv::Mat R_wc_prev = R_cw_prev.t();
+                        cv::Mat t_wc_prev = -R_wc_prev * prev_tvec_cw_;
+                        cv::Mat T_prev = cv::Mat::eye(4, 4, CV_64F);
+                        R_wc_prev.copyTo(T_prev(cv::Rect(0,0,3,3)));
+                        t_wc_prev.copyTo(T_prev(cv::Rect(3,0,1,3)));
+
+                        cv::Mat T_rel = cv::Mat::eye(4, 4, CV_64F);
+                        result.R.copyTo(T_rel(cv::Rect(0,0,3,3)));
+                        result.t.copyTo(T_rel(cv::Rect(3,0,1,3)));
+
+                        T_rough = T_prev * T_rel;
+                    }
+                }
+            }
+        }
+
+        // F2M fallback: if Stage1 failed but we have a previous pose, use it for Stage2
+        if (T_rough.empty() && has_prev_pose_ && !prev_rvec_cw_.empty()) {
+            cv::Mat R_cw_prev;
+            cv::Rodrigues(prev_rvec_cw_, R_cw_prev);
+            cv::Mat R_wc_prev = R_cw_prev.t();
+            cv::Mat t_wc_prev = -R_wc_prev * prev_tvec_cw_;
+            T_rough = cv::Mat::eye(4, 4, CV_64F);
+            R_wc_prev.copyTo(T_rough(cv::Rect(0,0,3,3)));
+            t_wc_prev.copyTo(T_rough(cv::Rect(3,0,1,3)));
+
+            if (imu_pred.valid && !imu_pred.R.empty()) {
+                cv::Mat T_delta = cv::Mat::eye(4, 4, CV_64F);
+                imu_pred.R.copyTo(T_delta(cv::Rect(0,0,3,3)));
+                if (!imu_pred.t.empty())
+                    imu_pred.t.copyTo(T_delta(cv::Rect(3,0,1,3)));
+                T_rough = T_rough * T_delta;
+            }
+        }
+
+        // --- Stage 2: TrackLocalMap (map point projection with rough pose) ---
+        if (!T_rough.empty() && local_map_ && local_map_->numMapPoints() > 0) {
+            std::vector<cv::Point3f> map_3d;
+            std::vector<cv::Point2f> map_2d;
+            int n_map = local_map_->getCorrespondencesByProjection(
+                T_rough, track_result.matches.curr_points,
+                camera_params.fx, camera_params.fy,
+                camera_params.cx, camera_params.cy,
+                15.0,  // Stage 1 rough pose 오차 감안 (KLT는 descriptor 없이 proximity 매칭)
+                map_3d, map_2d);
+
+            if (n_map >= 10) {
+                cv::Mat K = camera_params.getCameraMatrix();
+                cv::Mat distCoeffs = cv::Mat::zeros(4, 1, CV_64F);
+                // T_rough → T_cw for solvePnP initial guess
+                cv::Mat R_wc = T_rough(cv::Rect(0,0,3,3));
+                cv::Mat t_wc = (cv::Mat_<double>(3,1) << T_rough.at<double>(0,3),
+                    T_rough.at<double>(1,3), T_rough.at<double>(2,3));
+                cv::Mat R_cw = R_wc.t();
+                cv::Mat t_cw = -R_cw * t_wc;
+                cv::Mat rvec_guess, tvec_guess = t_cw;
+                cv::Rodrigues(R_cw, rvec_guess);
+
+                std::vector<int> inliers2;
+                bool ok2 = cv::solvePnPRansac(
+                    map_3d, map_2d, K, distCoeffs, rvec_guess, tvec_guess,
+                    true, 200, 8.0, 0.99, inliers2);
+
+                if (ok2 && static_cast<int>(inliers2.size()) >= 8) {
+                    // Iterative refinement
+                    std::vector<cv::Point3f> in_3d;
+                    std::vector<cv::Point2f> in_2d;
+                    for (int idx : inliers2) {
+                        in_3d.push_back(map_3d[idx]);
+                        in_2d.push_back(map_2d[idx]);
+                    }
+                    cv::solvePnP(in_3d, in_2d, K, distCoeffs,
+                                 rvec_guess, tvec_guess, true, cv::SOLVEPNP_ITERATIVE);
+
+                    // Stage 2 성공 → Map PnP 결과로 override
+                    result.pnp_success = true;
+                    result.pnp_inliers = static_cast<int>(in_3d.size());
+                    result.pnp_total_matches = n_map;
+                    result.inlier_ratio = static_cast<double>(result.pnp_inliers) / n_map;
+                    cv::Rodrigues(rvec_guess, result.R);
+                    result.t = tvec_guess;
+                    result.use_map_pnp = true;
+                    result.map_correspondences = n_map;
+                    map_pnp_done = true;
+
+                    static auto s2_clock = std::make_shared<rclcpp::Clock>(RCL_STEADY_TIME);
+                    RCLCPP_INFO_THROTTLE(logger, *s2_clock, 3000,
+                        "Stage2 Map PnP: %d/%d inliers (%.0f%%), map=%zu",
+                        result.pnp_inliers, n_map,
+                        result.inlier_ratio * 100.0, local_map_->numMapPoints());
+                }
+            }
+        }
+    }
+
+    result.features = detectFeatures(gray);
+    setPreviousFrame(rgb, depth, result.features);
+    return result;
+}
+
+// ─── Descriptor Matching 모드 (Legacy) ──────────────────────────────────────
+
+FrameProcessor::ProcessingResult
+FrameProcessor::processFrameDescriptor(const cv::Mat& rgb,
+                                       const cv::Mat& depth,
+                                       const CameraParams& camera_params,
+                                       bool first_frame,
+                                       bool enable_pose_estimation,
+                                       const ImuPredictedPose& imu_pred) {
     ProcessingResult result;
 
     cv::Mat gray = preprocessFrame(rgb);
@@ -40,7 +280,6 @@ FrameProcessor::processFrame(const cv::Mat& rgb,
             std::chrono::steady_clock::now() - match_start).count();
 
         // Phase 5: Multi-view consistency — track age 계산
-        // 각 keypoint의 연속 추적 프레임 수를 계산하고, 짧은 track 필터링
         std::vector<int> curr_keypoint_ages(result.features.keypoints.size(), 0);
         for (const auto& m : result.matches.matches) {
             int prev_age = (m.queryIdx >= 0 && m.queryIdx < static_cast<int>(prev_track_ages_.size()))
@@ -50,7 +289,6 @@ FrameProcessor::processFrame(const cv::Mat& rgb,
             }
         }
 
-        // Multi-view filter: age >= min_track_length만 유지
         const int min_track_length = 3;
         if (result.matches.size() > 80) {
             int mature_count = 0;
@@ -88,17 +326,13 @@ FrameProcessor::processFrame(const cv::Mat& rgb,
             }
         }
 
-        // track ages 저장 (다음 프레임용, filtering 전 전체 ages 사용)
         prev_track_ages_ = std::move(curr_keypoint_ages);
 
-        // 3D 점 생성 + PnP (enable_pose_estimation 시에만)
         if (enable_pose_estimation && !result.matches.empty() && !depth.empty() &&
             camera_params.fx > 0 && camera_params.fy > 0) {
             backprojectAndFilter(result.matches, depth, camera_params, /*use_curr=*/true);
 
-            // Phase 4: IMU-guided feature filtering (IMU gyro + prev VO translation)
-            // PnP 전에 IMU-predicted pose로 각 feature를 검증, 동적 물체 feature 제거
-            // 최소 100개 매칭이 있을 때만 적용 (적으면 필터링이 해로움)
+            // IMU-guided feature filtering
             if (imu_pred.valid && !imu_pred.R.empty() && !imu_pred.t.empty() &&
                 result.matches.prev_points_3d.size() >= 100) {
                 cv::Mat K = camera_params.getCameraMatrix();
@@ -108,12 +342,10 @@ FrameProcessor::processFrame(const cv::Mat& rgb,
                 cv::projectPoints(result.matches.prev_points_3d, rvec_imu, imu_pred.t,
                                   K, cv::noArray(), projected);
 
-                // Adaptive threshold: base 10px + 회전속도 비례
                 const double base_threshold = 10.0;
                 const double reproj_threshold = base_threshold +
-                    imu_pred.angular_rate * 5.0;  // 1 rad/s → +5px
+                    imu_pred.angular_rate * 5.0;
 
-                // 각 feature의 reprojection error 계산
                 std::vector<std::pair<double, size_t>> errors;
                 errors.reserve(projected.size());
                 for (size_t k = 0; k < projected.size(); ++k) {
@@ -121,12 +353,10 @@ FrameProcessor::processFrame(const cv::Mat& rgb,
                     errors.emplace_back(err, k);
                 }
 
-                // 최소 보장: 전체의 60% 또는 100개 이상 유지 (보수적)
                 size_t min_retain = std::max(static_cast<size_t>(100),
                     static_cast<size_t>(projected.size() * 0.6));
                 min_retain = std::min(min_retain, projected.size());
 
-                // threshold로 1차 필터링
                 std::vector<size_t> keep_indices;
                 for (const auto& [err, idx] : errors) {
                     if (err <= reproj_threshold) {
@@ -134,7 +364,6 @@ FrameProcessor::processFrame(const cv::Mat& rgb,
                     }
                 }
 
-                // 최소 보장 미달 시 error 낮은 순으로 보충
                 if (keep_indices.size() < min_retain) {
                     std::sort(errors.begin(), errors.end());
                     keep_indices.clear();
@@ -201,6 +430,8 @@ FrameProcessor::processFrame(const cv::Mat& rgb,
     return result;
 }
 
+// ─── 공통 유틸리티 ──────────────────────────────────────────────────────────
+
 cv::Mat FrameProcessor::preprocessFrame(const cv::Mat& rgb) {
     cv::Mat gray;
     cv::cvtColor(rgb, gray, cv::COLOR_BGR2GRAY);
@@ -236,7 +467,6 @@ void FrameProcessor::backprojectAndFilter(FeatureMatches& matches,
     const double cx = camera_params.cx;
     const double cy = camera_params.cy;
 
-    // ZED SDK: mm 단위 (7948=7.9m). min 50mm, max 20m
     const float min_depth = 50.0f;
     const float max_depth = 20000.0f;
 
@@ -263,7 +493,8 @@ void FrameProcessor::backprojectAndFilter(FeatureMatches& matches,
         float x = static_cast<float>((pt.x - cx) * z / fx);
         float y = static_cast<float>((pt.y - cy) * z / fy);
 
-        valid_matches.push_back(matches.matches[i]);
+        if (i < matches.matches.size())
+            valid_matches.push_back(matches.matches[i]);
         valid_prev.push_back(matches.prev_points[i]);
         valid_curr.push_back(matches.curr_points[i]);
         valid_3d.emplace_back(x, y, z);
@@ -271,33 +502,6 @@ void FrameProcessor::backprojectAndFilter(FeatureMatches& matches,
 
     if (valid_3d.empty()) {
         matches.prev_points_3d.clear();
-        static bool depth_debug_logged = false;
-        if (!depth_debug_logged && !sample_points.empty()) {
-            float z0 = 0, z1 = 0, z2 = 0;
-            int u0 = static_cast<int>(std::round(sample_points[0].x));
-            int v0 = static_cast<int>(std::round(sample_points[0].y));
-            if (u0 >= 0 && u0 < depth.cols && v0 >= 0 && v0 < depth.rows) {
-                z0 = depth.at<float>(v0, u0);
-            }
-            if (sample_points.size() > 1) {
-                int u1 = static_cast<int>(std::round(sample_points[1].x));
-                int v1 = static_cast<int>(std::round(sample_points[1].y));
-                if (u1 >= 0 && u1 < depth.cols && v1 >= 0 && v1 < depth.rows) {
-                    z1 = depth.at<float>(v1, u1);
-                }
-            }
-            if (sample_points.size() > 2) {
-                int u2 = static_cast<int>(std::round(sample_points[2].x));
-                int v2 = static_cast<int>(std::round(sample_points[2].y));
-                if (u2 >= 0 && u2 < depth.cols && v2 >= 0 && v2 < depth.rows) {
-                    z2 = depth.at<float>(v2, u2);
-                }
-            }
-            RCLCPP_WARN(rclcpp::get_logger("frame_processor"),
-                "backproject: 0 valid 3D (depth sample: %.3f, %.3f, %.3f at %zu matches, depth %dx%d)",
-                z0, z1, z2, sample_points.size(), depth.cols, depth.rows);
-            depth_debug_logged = true;
-        }
         return;
     }
 
@@ -307,4 +511,4 @@ void FrameProcessor::backprojectAndFilter(FeatureMatches& matches,
     matches.prev_points_3d = std::move(valid_3d);
 }
 
-} // namespace vo 
+} // namespace vo

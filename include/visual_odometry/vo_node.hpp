@@ -4,30 +4,24 @@
 #include <rclcpp/node_options.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/msg/camera_info.hpp>
-#include <opencv2/highgui.hpp>
-#include "visual_odometry/image_processor.hpp"
-#include "visual_odometry/feature_detector.hpp"
-#include "visual_odometry/types.hpp"
-#include <thread>
-#include <mutex>
-#include <deque>
-#include "visual_odometry/zed_interface.hpp"
-#include <deque>
-#include <queue>
-#include <condition_variable>
-#include <geometry_msgs/msg/pose_stamped.hpp>
 #include <sensor_msgs/msg/imu.hpp>
+#include <geometry_msgs/msg/pose_stamped.hpp>
 #include <tf2_ros/transform_broadcaster.h>
 #include <tf2_ros/static_transform_broadcaster.h>
 #include "visual_odometry/msg/vo_state.hpp"
-#include <chrono>
-#include <future>  // std::async를 위해 추가
-#include "visual_odometry/feature_matcher.hpp"  // 추가
-#include "visual_odometry/visualization.hpp"  // 추가
-#include "visual_odometry/frame_processor.hpp"  // 추가
+#include "visual_odometry/types.hpp"
+#include "visual_odometry/vio_manager.hpp"
+#include "visual_odometry/zed_interface.hpp"
+#include "visual_odometry/visualization.hpp"
+#include "visual_odometry/image_processor.hpp"
+#include "visual_odometry/feature_detector.hpp"
 #include "visual_odometry/logger.hpp"
 #include "visual_odometry/resource_monitor.hpp"
-#include "visual_odometry/imu_fusion.hpp"
+#include <thread>
+#include <mutex>
+#include <queue>
+#include <condition_variable>
+#include <deque>
 
 namespace vo {
 
@@ -37,33 +31,30 @@ public:
     virtual ~VisualOdometryNode();
 
 private:
-    // 로깅 및 모니터링
+    // ─── Logging / Monitoring ───────────────────────────────────────────────
     std::unique_ptr<Logger> logger_;
     std::unique_ptr<ResourceMonitor> resource_monitor_;
 
-    // 파라미터 관련 메서드들
+    // ─── Parameters ─────────────────────────────────────────────────────────
     void declareParameters();
-    void applyCurrentParameters();  // 메서드 선언 추가
+    void applyCurrentParameters();
     rcl_interfaces::msg::SetParametersResult onParamChange(
         const std::vector<rclcpp::Parameter>& params);
-    
-    // 콜백 함수들
-    void rgbCallback(const sensor_msgs::msg::Image::SharedPtr msg);
-    void depthCallback(const sensor_msgs::msg::Image::SharedPtr msg);
-    void cameraInfoCallback(const sensor_msgs::msg::CameraInfo::SharedPtr msg);
+    OnSetParametersCallbackHandle::SharedPtr param_callback_handle_;
 
-    // 멤버 변수들
-    ImageProcessor image_processor_;
-    std::shared_ptr<FeatureDetector> feature_detector_;
-    std::shared_ptr<FeatureMatcher> feature_matcher_;  // 추가
+    // ─── VIO Manager (THE pipeline) ─────────────────────────────────────────
+    std::unique_ptr<VIOManager> vio_manager_;
     CameraParams camera_params_;
-    
+    bool camera_info_received_{false};
+
+    // ─── ROS2 I/O ───────────────────────────────────────────────────────────
     // Subscribers
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr rgb_sub_;
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr depth_sub_;
     rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr camera_info_sub_;
-    
-    // Publisher
+    rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_;
+
+    // Publishers
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr feature_img_pub_;
     rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr pose_pub_;
     rclcpp::Publisher<visual_odometry::msg::VOState>::SharedPtr vo_state_pub_;
@@ -71,19 +62,43 @@ private:
     std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
     std::unique_ptr<tf2_ros::StaticTransformBroadcaster> static_tf_broadcaster_;
 
-    // 파라미터 콜백 핸들
-    OnSetParametersCallbackHandle::SharedPtr param_callback_handle_;
+    // ─── Callbacks ──────────────────────────────────────────────────────────
+    void rgbCallback(const sensor_msgs::msg::Image::SharedPtr msg);
+    void depthCallback(const sensor_msgs::msg::Image::SharedPtr msg);
+    void cameraInfoCallback(const sensor_msgs::msg::CameraInfo::SharedPtr msg);
+    void imuCallback(const sensor_msgs::msg::Imu::SharedPtr msg);
 
-    // 상태 변수들
-    bool camera_info_received_{false};
-    bool features_detected_{false};
-    cv::Mat current_frame_;
-    cv::Mat prev_frame_;
+    // ─── Image Processing ───────────────────────────────────────────────────
+    void processImages(const cv::Mat& rgb, const cv::Mat& depth);
+    void publishResults(const VIOOutput& output, double processing_time_ms);
+    void publishStaticTransform();
+    VIOConfig loadVIOConfig();
+
+    // ─── ZED SDK ────────────────────────────────────────────────────────────
+    std::unique_ptr<ZEDInterface> zed_interface_;
+    std::string input_source_{"ros2"};
+    rclcpp::TimerBase::SharedPtr zed_timer_;
+    void zedTimerCallback();
+    bool getImages(cv::Mat& rgb, cv::Mat& depth);
+    std::thread imu_poll_thread_;
+    void imuPollLoop();
+    cv::Mat R_cam_imu_;   // rotation: IMU frame → camera (IMAGE) frame
+    bool has_cam_imu_tf_{false};
+
+    // ─── Processing Thread ──────────────────────────────────────────────────
+    std::queue<std::pair<cv::Mat, cv::Mat>> image_queue_;
+    std::mutex image_queue_mutex_;
+    std::condition_variable image_ready_;
+    std::thread processing_thread_;
+    bool should_exit_{false};
+    void processingLoop();
+
+    // ─── Depth buffer (ros2 mode) ───────────────────────────────────────────
     cv::Mat current_depth_;
-    cv::Mat prev_depth_;
-    std::mutex depth_mutex_;  // ros2 모드: rgb/depth 콜백 동시 접근 보호
+    std::mutex depth_mutex_;
 
-    // 시각화 관련 변수들
+    // ─── Visualization ──────────────────────────────────────────────────────
+    std::unique_ptr<Visualizer> visualizer_;
     bool show_original_{false};
     bool show_features_{false};
     bool show_matches_{false};
@@ -91,113 +106,13 @@ private:
     int window_height_{600};
     int window_pos_x_{100};
     int window_pos_y_{100};
-    const std::string original_window_name_{"Original Image"};
-    const std::string feature_window_name_{"Feature Detection"};
-    const std::string matches_window_name_{"Feature Matches"};
+    cv::Mat prev_frame_;
 
-    // FPS 계산을 위한 변수들
-    rclcpp::Time last_fps_time_{0};
-    int fps_frame_count_{0};
-    double fps_total_process_time_{0.0};
-    
-    // ZED 인터페이스
-    std::unique_ptr<ZEDInterface> zed_interface_;
-    std::string input_source_{"ros2"};
-    
-    // 이미지 획득 메서드
-    bool getImages(cv::Mat& rgb, cv::Mat& depth);
-    
-    void displayLoop();
-
-    // ZED SDK 관련
-    rclcpp::TimerBase::SharedPtr zed_timer_;
-    void zedTimerCallback();
-    void processImages(const cv::Mat& rgb, const cv::Mat& depth);
-
-    cv::Mat display_frame_original_;   // 원본 이미지용
-    cv::Mat display_frame_features_;   // 특징점 이미지용
-    cv::Mat display_frame_matches_;    // 매칭 결과 이미지용
-
-    // 이미지 처리를 위한 버퍼들
-    cv::Mat resized_frame_;
-    cv::Mat gray_buffer_;
-    cv::Mat resized_original_;
-    cv::Mat resized_features_;
-
-    // 타이밍 측정을 위한 변수들
-    std::chrono::steady_clock::time_point start_time_;
-    rclcpp::Time resize_start_;
-    rclcpp::Time feature_start_;
-    rclcpp::Time viz_start_;
-
-    // FPS 측정을 위한 변수들
-    std::deque<double> original_frame_times_;  // 원본 이미지용
-    std::deque<double> feature_frame_times_;   // 특징점 검출용
-    rclcpp::Time last_fps_print_time_;
-    double original_fps_;
-    double feature_fps_;
-    int fps_window_size_;
-    double zed_acquisition_time_;
-
-    std::queue<std::pair<cv::Mat, cv::Mat>> image_queue_;
-    std::mutex image_queue_mutex_;
-    std::condition_variable image_ready_;
-    std::thread processing_thread_;
-    bool should_exit_{false};  // 다시 추가
-    void processingLoop();
-
-    // 매칭 관련 멤버 추가
-    Features prev_features_;
-    cv::Mat prev_frame_gray_;
-    bool first_frame_{true};
-
-    // 이미지 처리를 위한 버퍼
-    cv::Mat working_frame_;  // 작업용 프레임 버퍼
-    
-    // 새로운 시각화 함수 선언
-    void updateVisualization(const cv::Mat& rgb, 
-                           const Features& features,
-                           const FeatureMatches& matches);
-
-    // 결과 발행 함수 선언
-    void publishResults(const ProcessingMetrics& metrics);
-    void publishStaticTransform();  // camera_link → camera_optical_frame
-
-    // 특징점 검출 파라미터
-    int max_features_{500};
-    int fast_threshold_{20};
-
-    // 비동기 작업 관리를 위한 변수들
-    std::future<void> viz_future_;
-    std::future<void> pub_future_;
-
-    // 시각화 관련 멤버 추가
-    std::unique_ptr<Visualizer> visualizer_;
-
-    // 컴포넌트들
-    std::unique_ptr<FrameProcessor> frame_processor_;    // 추가
-
-    // 포즈 누적 (frame0 기준 카메라 pose)
-    cv::Mat T_global_;  // 4x4, 초기값 I
-    // 이전 프레임 VO delta (constant velocity model용, optical frame, mm)
-    cv::Mat prev_vo_t_;  // 3x1, 이전 프레임의 PnP translation
-
-    // IMU-VO fusion
-    std::unique_ptr<ImuFusionBase> imu_fusion_;
-    ImuData latest_imu_;
-    std::deque<ImuData> imu_buffer_;
-    static constexpr size_t kMaxImuBuffer = 500;  // ~1.25초 @400Hz
-    std::mutex imu_mutex_;
-    rclcpp::Time last_fusion_time_;
-    rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_;
-    void imuCallback(const sensor_msgs::msg::Imu::SharedPtr msg);
-
-    // ZED SDK 고빈도 IMU 폴링 스레드 (200Hz, TIME_REFERENCE::CURRENT)
-    std::thread imu_poll_thread_;
-    void imuPollLoop();
-
-    // 평균 이동 거리 계산 함수
-    float calculateAverageMovement(const FeatureMatches& matches);
+    // ─── FPS ────────────────────────────────────────────────────────────────
+    int fps_window_size_{60};
+    int frame_count_{0};
+    double fps_start_time_{0.0};
+    double current_fps_{0.0};
 };
 
-} // namespace vo 
+}  // namespace vo

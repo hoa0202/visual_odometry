@@ -122,6 +122,20 @@ bool ZEDInterface::getResolution(int& width, int& height) {
     return true;
 }
 
+bool ZEDInterface::getCameraImuTransform(cv::Mat& R_cam_imu, cv::Mat& t_cam_imu) {
+    if (!is_connected_) return false;
+    auto cam_info = zed_.getCameraInformation();
+    sl::Transform tf = cam_info.sensors_configuration.camera_imu_transform;
+    sl::Rotation rot = tf.getRotationMatrix();
+    R_cam_imu = cv::Mat(3, 3, CV_64F);
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c)
+            R_cam_imu.at<double>(r, c) = rot.r[r * 3 + c];
+    sl::Translation trans = tf.getTranslation();
+    t_cam_imu = (cv::Mat_<double>(3, 1) << trans.x, trans.y, trans.z);
+    return true;
+}
+
 cv::Mat ZEDInterface::slMat2cvMat(sl::Mat& input) {
     return cv::Mat(input.getHeight(), input.getWidth(),
                   CV_8UC4, input.getPtr<sl::uchar1>(sl::MEM::CPU));

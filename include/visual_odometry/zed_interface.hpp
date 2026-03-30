@@ -20,6 +20,7 @@ public:
     bool getSensorsDataCurrent(sl::SensorsData& sensors);
     bool getCameraParameters(cv::Mat& K, cv::Mat& D);
     bool getResolution(int& width, int& height);
+    bool getCameraImuTransform(cv::Mat& R_cam_imu, cv::Mat& t_cam_imu);
 
 private:
     sl::Camera zed_;

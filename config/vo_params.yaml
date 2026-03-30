@@ -96,13 +96,37 @@
       width: 640
       height: 480
 
-    # Visual Odometry Parameters
+    # Visual Odometry Parameters (legacy)
     vo:
       min_feature_distance: 30.0
       max_feature_distance: 5000.0
       min_matches: 10
       ransac_threshold: 3.0
-      keyframe_rotation_threshold: 0.1  # radians
-      keyframe_translation_threshold: 0.1  # meters
-      zero_motion_threshold_mm: 2.0  # 정지 시: |t| < 이 값이면
-      zero_motion_rotation_threshold_rad: 0.002  # |θ| < 이 값(rad)이면 포즈 누적 스킵 (t와 θ 둘 다 작을 때) 
+      keyframe_rotation_threshold: 0.1
+      keyframe_translation_threshold: 0.1
+      zero_motion_threshold_mm: 2.0
+      zero_motion_rotation_threshold_rad: 0.002
+
+    # ─── RTAB-Map Style VIO Parameters ───────────────────────────────────
+    vio:
+      init_mode: "full"                  # "full" | "simple" | "none"
+      use_imu: true                      # IMU preintegration (front-end prediction only)
+      graph_window_size: 50              # Working Memory max size
+      lost_timeout_sec: 5.0              # RECENTLY_LOST → LOST timeout
+      vocabulary_path: ""                # DBoW2 ORB vocab (empty = auto-detect)
+      loop_closure:
+        enable: true                     # Bayesian loop closure detection
+        min_matches: 30                  # geometric verification min matches
+        min_score: 0.3                   # BoW similarity floor
+        min_interval_keyframes: 10       # min KF gap to consider loop
+        bayesian_threshold: 0.55         # P(loop|obs) acceptance threshold
+        temporal_consistency: 3          # consecutive wins before accept
+      memory:
+        stm_size: 10                     # Short-Term Memory max nodes
+        rehearsal_similarity: 0.8        # BoW similarity for node merge
+        proximity_max_dist: 0.5          # meters, proximity link threshold
+      imu_noise:                         # ZED2i BMI088 defaults
+        accel_sigma: 0.05               # m/s²/√Hz
+        gyro_sigma: 0.005               # rad/s/√Hz
+        accel_bias_rw: 0.0005           # m/s³/√Hz
+        gyro_bias_rw: 0.00005           # rad/s²/√Hz

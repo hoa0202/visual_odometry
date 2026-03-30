@@ -578,21 +578,97 @@ ZED sensor 토픽과 호환되도록 설정됨.
    - [x] 5.5.5 Translation: PIM predict(velocity) 사용, ~0이면 constant velocity fallback
    - [x] 5.5.6 로그: `IMU predict: dt= rot= t= ang_rate= bias_g=`
 
+   **Phase A: KLT Optical Flow Tracker** (VIO 아키텍처 전환) ✅ 완료 (2026-03-25)
+   > 원리: ORB descriptor matching → KLT optical flow 전환. VINS-Mono 스타일.
+   > descriptor 비교 대신 pixel-level 추적 → 동일 물리점의 연속 추적 보장.
+   > track age가 자연스럽게 누적 → multi-view consistency 내장 (별도 descriptor matching 불필요).
+   > Forward-backward consistency check + Fundamental matrix RANSAC → outlier 제거.
+
+   - [x] A.1 `feature_tracker.hpp/cpp`: GFTT + KLT forward-backward tracker 구현
+   - [x] A.2 `frame_processor.hpp/cpp`: dual mode 지원 (KLT / descriptor matching)
+   - [x] A.3 `vo_node.hpp/cpp`: FeatureTracker 생성 → FrameProcessor(KLT 모드) 전달
+   - [x] A.4 `types.hpp`: FeatureMatches::size()/empty() KLT 호환 (prev_points 기준)
+   - [x] A.5 빌드 성공
+
+   **VIO 아키텍처 로드맵** (ORB-SLAM3/VINS-Mono 수준 목표)
+   > Phase A (KLT) → Phase B (Keyframe + Local Map) → Phase C (IMU tightly-coupled) → Phase D (Sliding Window BA)
+
+   **Phase B: Keyframe + Local Map** ✅ 완료 (2026-03-25)
+   > 핵심 변경: frame-to-frame PnP → **map 기반 PnP** (absolute pose estimation).
+   > solvePnP(world_3d, curr_2d) → T_camera_from_world → drift 누적 없는 absolute pose.
+   > KLT track_id로 map point correspondence 즉시 조회 (descriptor matching 불필요).
+   > Keyframe 자동 선정: map correspondence 비율 < 50% 또는 < 50개 시 새 keyframe.
+
+   - [x] B.1 `local_map.hpp/cpp`: LocalMap 클래스 (MapPoint, addKeyframe, getCorrespondences, shouldBeKeyframe, cullOldPoints)
+   - [x] B.2 `feature_tracker.hpp/cpp`: TrackingResult에 track_ids 추가
+   - [x] B.3 `frame_processor.hpp/cpp`: Map PnP 우선 시도 → frame-to-frame fallback
+   - [x] B.4 `vo_node.hpp/cpp`: keyframe 관리, map point backproject (camera→world), LocalMap 연결
+   - [x] B.5 Pose update: map PnP → T_global 직접 설정 (absolute), frame-to-frame → 기존 누적
+   - [x] B.6 Map point culling: 120프레임(~2초) 미관측 시 제거
+   - [x] B.7 빌드 성공
+
+   **Phase C: IMU Tightly-coupled Prediction** (예정)
+   > 현재: IMU prediction으로 feature filtering만 수행.
+   > 개선: IMU predicted pose로 feature search window 제한 (matching 전 단계).
+   > 빠른 움직임에서도 안정적 feature tracking.
+   - [ ] C.1 IMU predicted pose → feature search region 제한
+   - [ ] C.2 KLT initial guess에 IMU prediction 활용
+
+   **Phase D: ORB-SLAM3 Tracking Pipeline 완전 구현** ✅ (2026-03-26)
+   > **ORB-SLAM3 실제 구조를 정확히 따름**:
+   > - **Tracking thread** (매 프레임): Constant velocity model → Map PnP (initial guess) → Motion-only BA
+   > - **Backend** (keyframe): Factor graph sliding window (local BA)
+   > - Motion-only BA: GTSAM으로 pose 1개만 최적화, landmark tight prior로 고정, between factor 없음
+   > - Constant velocity model: T_predicted = T_curr * (T_prev⁻¹ * T_curr)
+   >
+   > **수정 사항 (전면 개편)**:
+   > - `frame_processor.cpp`: useExtrinsicGuess=true + 이전 최적화 pose 초기값
+   >   + 3단계 iterative PnP (RANSAC → inlier-only refinement → tight threshold re-solve)
+   > - `vo_node.cpp`: T_global_ 누적 완전 제거. Factor graph output = THE pose.
+   >   setPreviousPose()로 최적화 pose를 다음 프레임 PnP initial guess로 전달.
+   > - `factor_graph.cpp`: Between factor 대폭 약화 (0.3/0.5 sigma),
+   >   Reprojection factor 강화 (Huber 1.0 + 1.5px sigma) — ORB-SLAM3 수준.
+   - [x] D.1 Map PnP: useExtrinsicGuess=true + setPreviousPose()
+     - 이전 프레임의 최적화된 T_camera_from_world를 rvec/tvec 초기값으로 전달
+     - PnP가 이전 pose 근처에서 시작 → yaw jump 방지
+   - [x] D.2 Iterative PnP refinement (3단계)
+     - 1차: RANSAC (200 iter, 6px threshold)
+     - 2차: inlier만으로 SOLVEPNP_ITERATIVE (warm start)
+     - 3차: reprojection error < 4px 최종 필터 → re-solve
+   - [x] D.3 T_global_ 누적 완전 제거
+     - Map PnP: absolute pose 직접 설정 (이전과 동일)
+     - Frame-to-frame: delta만 추출, T_global_ 건드리지 않음 (factor graph가 담당)
+   - [x] D.4 Factor graph = THE pose
+     - factor graph fuse → T_global_ 업데이트 (유일한 pose 소스)
+     - 최적화된 pose → setPreviousPose() → 다음 프레임 initial guess
+     - 최적화된 pose → keyframe 생성 → map point 정확도 향상
+   - [x] D.5 Noise model 재설계 (ORB-SLAM3 style)
+     - Between factor: (0.3, 0.3, 0.3, 0.5, 0.5, 0.5) — 약한 보조 constraint
+     - Reprojection: Huber(1.0) + Isotropic(2, 1.5px) — 강한 주 constraint
+   - [x] D.6 Reprojection factor: multi-observation 필수
+     - 첫 관측은 등록만, ≥2 관측부터 factor 추가
+     - Active landmark 100개 cap
+   - 수정 파일: `frame_processor.hpp`, `frame_processor.cpp`, `vo_node.cpp`,
+     `factor_graph.cpp`
+
    **Phase 6: Semantic masking** (고급, 후순위)
    - [ ] 6.1 경량 segmentation (MobileNet/YOLO)으로 사람/차량 마스크
    - [ ] 6.2 마스크 영역 feature 추출 제외
 
    > **비교표: 대표 시스템 vs 우리 시스템**
-   > | 방어 계층 | OpenVINS | ORB-SLAM3 | RTAB-Map | 우리 시스템 |
-   > |-----------|----------|-----------|----------|------------|
-   > | RANSAC PnP | ✅ | ✅ | ✅ | ✅ |
-   > | IMU-guided filtering | ✅ chi² | ❌ | ❌ | ✅ Phase 4 (GTSAM bias-corrected) |
-   > | Multi-view consistency | ❌ | ✅ (map point culling) | ✅ | ✅ Phase 5 |
-   > | Robust kernel | ❌ | ✅ (Huber) | ❌ | ✅ |
-   > | IMU-VO noise 조절 | ❌ | ❌ | ❌ | ✅ |
-   > | GTSAM preintegration prediction | ✅ | ❌ | ❌ | ✅ Phase 5.5 |
-   > | Multi-round BA | ❌ | ✅ | ✅ | ❌ |
-   > | Semantic mask | ❌ | ❌ | ❌ | ❌ |
+   > | 핵심 요소 | ORB-SLAM3 | VINS-Mono | 우리 시스템 |
+   > |-----------|-----------|-----------|------------|
+   > | PnP initial guess | ✅ velocity model | ✅ IMU prediction | ✅ 이전 최적화 pose (Phase D) |
+   > | Iterative PnP / motion-only BA | ✅ g2o | ✅ sliding window | ✅ 3단계 iterative (Phase D) |
+   > | Factor graph = THE pose | ✅ | ✅ | ✅ (Phase D) |
+   > | T_global_ 누적 | ❌ 없음 | ❌ 없음 | ❌ 제거 (Phase D) |
+   > | Between factor (약) + Reproj (강) | ✅ | ✅ | ✅ (Phase D) |
+   > | useExtrinsicGuess | ✅ | N/A | ✅ (Phase D) |
+   > | KLT optical flow | ❌ (ORB) | ✅ | ✅ Phase A |
+   > | Keyframe + Local Map | ✅ | ✅ | ✅ Phase B |
+   > | IMU preintegration | ✅ | ✅ | ✅ Phase 5.5 |
+   > | IMU-guided filtering | ❌ | ✅ chi² | ✅ Phase 4 |
+   > | Semantic mask | ❌ | ❌ | ❌ |
 
 5. **루프 클로저** (Phase 4 이후)
    - [ ] 키프레임 선택 (baseline: 0.3~0.5m 또는 15°)

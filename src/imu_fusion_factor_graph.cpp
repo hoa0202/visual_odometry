@@ -20,6 +20,7 @@ struct ImuFusionFactorGraph::Impl {
     bool has_prev{false};
     bool imu_preintegrated{false};  // 현재 프레임에서 preintegration 완료 여부
     bool is_zero_motion{false};     // Phase 4: IMU 기반 정지 감지
+    bool camera_calib_set{false};   // Phase D: camera calibration 설정 여부
 };
 
 ImuFusionFactorGraph::ImuFusionFactorGraph(size_t window_size)
@@ -112,6 +113,12 @@ PoseOutput ImuFusionFactorGraph::fuse(const PoseInput& vo_pose,
         if (impl_->is_zero_motion) {
             impl_->backend.addZeroVelocityConstraint(idx);
         }
+
+        // Phase D: Reprojection factors (sliding window BA)
+        if (!vo_pose.track_ids.empty() && impl_->camera_calib_set) {
+            impl_->backend.addReprojectionFactors(idx, vo_pose.track_ids,
+                                                   vo_pose.pixels, vo_pose.points_3d_cam);
+        }
     }
 
     PoseOutput result = impl_->backend.optimize();
@@ -171,6 +178,13 @@ PoseOutput ImuFusionFactorGraph::fuse(const PoseInput& vo_pose, const ImuData& i
 ImuPrediction ImuFusionFactorGraph::predictFromImu(
     const std::vector<ImuData>& body_frame_samples) {
     return impl_->backend.predictFromImu(body_frame_samples);
+}
+
+void ImuFusionFactorGraph::setCameraCalibration(double fx, double fy, double cx, double cy) {
+    impl_->backend.setCameraCalibration(fx, fy, cx, cy);
+    impl_->camera_calib_set = true;
+    RCLCPP_INFO(logger(), "Phase D: camera calibration set (fx=%.1f fy=%.1f cx=%.1f cy=%.1f)",
+        fx, fy, cx, cy);
 }
 
 void ImuFusionFactorGraph::reset() {

@@ -6,15 +6,6 @@
 
 namespace vo {
 
-/** IMU preintegration 노이즈 파라미터 (ZED 2i BMI088 기본값) */
-struct ImuPreintegrationParams {
-    double accel_noise_sigma{0.05};       // m/s²/√Hz
-    double gyro_noise_sigma{0.005};       // rad/s/√Hz
-    double accel_bias_rw_sigma{0.0005};   // m/s³/√Hz (bias random walk, tighter)
-    double gyro_bias_rw_sigma{0.00005};   // rad/s²/√Hz (bias 변동 억제)
-    double gravity{9.81};                 // m/s² (Z-up, ROS convention)
-};
-
 /** 6-DOF relative pose (x,y,z m; roll,pitch,yaw rad). GTSAM Between(i,j) expects T_i_from_j. */
 struct DeltaPose {
     double x{0.0}, y{0.0}, z{0.0};
@@ -90,6 +81,34 @@ public:
     static bool detectZeroMotion(const std::vector<ImuData>& imu_samples,
                                   double gyro_threshold = 0.05,
                                   double accel_var_threshold = 0.15);
+
+    /** Phase D: Camera calibration 설정 (reprojection factor용) */
+    void setCameraCalibration(double fx, double fy, double cx, double cy);
+
+    /** Phase D: Reprojection factors 추가 (sliding window BA).
+     *  pose_idx: 현재 pose 인덱스.
+     *  track_ids: KLT track IDs. pixels: 2D 관측 (u,v). points_3d_cam: camera frame 3D (mm→m 변환 내부 수행).
+     *  world frame 3D landmark 생성/갱신 + GenericProjectionFactor 추가. */
+    void addReprojectionFactors(size_t pose_idx,
+                                const std::vector<int>& track_ids,
+                                const std::vector<cv::Point2f>& pixels,
+                                const std::vector<cv::Point3f>& points_3d_cam);
+
+    /** ORB-SLAM3 style Motion-only BA.
+     *  현재 pose 1개만 최적화. Map points는 고정. Between factor 없음.
+     *  optical frame에서 직접 동작 (body frame 변환 없음).
+     *  @param T_world_cam  4x4 T_world_from_camera (optical frame, mm)
+     *  @param world_points  map에서 가져온 3D world points (optical frame, mm)
+     *  @param pixels        대응하는 2D 관측 (pixel)
+     *  @param out_inliers   출력: 최종 inlier 수
+     *  @return 최적화된 4x4 T_world_from_camera. 실패 시 입력 그대로. */
+    /** @param octaves  각 pixel의 pyramid octave level (information matrix 스케일링용).
+     *                   비어있으면 전부 level 0 취급. */
+    cv::Mat motionOnlyBA(const cv::Mat& T_world_cam,
+                         const std::vector<cv::Point3f>& world_points,
+                         const std::vector<cv::Point2f>& pixels,
+                         int& out_inliers,
+                         const std::vector<int>& octaves = {}) const;
 
     /** prev→curr 상대 pose (T_curr_from_prev). addOdometryFactor에는 T_prev_from_curr 필요. */
     static DeltaPose computeDelta(const PoseOutput& prev, const PoseOutput& curr);

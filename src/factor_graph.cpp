@@ -1,4 +1,5 @@
 #include "visual_odometry/factor_graph.hpp"
+#include <opencv2/core.hpp>
 #include <gtsam/geometry/Pose3.h>
 #include <gtsam/geometry/Rot3.h>
 #include <gtsam/slam/BetweenFactor.h>
@@ -10,7 +11,11 @@
 #include <gtsam/linear/NoiseModel.h>
 #include <gtsam/navigation/CombinedImuFactor.h>
 #include <gtsam/navigation/ImuBias.h>
+#include <gtsam/slam/ProjectionFactor.h>
+#include <gtsam/geometry/Cal3_S2.h>
 #include <rclcpp/rclcpp.hpp>
+#include <map>
+#include <set>
 
 namespace vo {
 
@@ -75,6 +80,14 @@ struct FactorGraphBackend::Impl {
     std::unique_ptr<gtsam::PreintegratedCombinedMeasurements> pim;
     bool imu_ready{false};
 
+    // Phase D: reprojection factor (sliding window BA)
+    boost::shared_ptr<gtsam::Cal3_S2> camera_calib;
+    gtsam::SharedNoiseModel reproj_noise;
+    std::map<int, gtsam::Key> track_to_landmark;       // track_id → landmark key
+    std::map<gtsam::Key, std::set<size_t>> lm_poses;   // landmark → visible pose indices
+    std::map<gtsam::Key, gtsam::Point3> lm_saved_positions;  // sliding window 생존 landmark 위치
+    int next_lm_id{0};
+
     // Phase 3: velocity/bias 노드 관리
     gtsam::SharedNoiseModel vel_prior_noise;
     gtsam::SharedNoiseModel bias_prior_noise;
@@ -85,14 +98,19 @@ struct FactorGraphBackend::Impl {
     Impl() {
         prior_noise = gtsam::noiseModel::Diagonal::Sigmas(
             (gtsam::Vector(6) << 0.01, 0.01, 0.01, 0.05, 0.05, 0.05).finished());
-        // Phase 5: 기본 VO noise 상향 (IMU 상대적으로 더 신뢰)
+        // Between factor: motion-only BA가 primary tracking이므로
+        // backend sliding window에서는 적당한 강도 (너무 약하면 이동 추적 실패)
         between_noise = gtsam::noiseModel::Diagonal::Sigmas(
-            (gtsam::Vector(6) << 0.08, 0.08, 0.08, 0.15, 0.15, 0.15).finished());
-        // velocity prior: 정지 시작 가정, 넉넉한 sigma
-        vel_prior_noise = gtsam::noiseModel::Isotropic::Sigma(3, 0.5);  // m/s
-        // bias prior: zero bias 가정, 타이트한 sigma (BMI088 typical bias ~0.01 rad/s)
-        // 0.01 → bias가 ±0.03 rad/s (3σ) 이내로 제한 — 0.1은 너무 느슨하여 VO 오차를 bias로 흡수
+            (gtsam::Vector(6) << 0.1, 0.1, 0.1, 0.2, 0.2, 0.2).finished());
+        // velocity prior
+        vel_prior_noise = gtsam::noiseModel::Isotropic::Sigma(3, 0.5);
+        // bias prior: tight
         bias_prior_noise = gtsam::noiseModel::Isotropic::Sigma(6, 0.01);
+        // Reprojection: STRONG — ORB-SLAM3 수준 (1.5px sigma, Huber 1.0)
+        // 이것이 pose estimation의 주 constraint
+        reproj_noise = gtsam::noiseModel::Robust::Create(
+            gtsam::noiseModel::mEstimator::Huber::Create(1.0),
+            gtsam::noiseModel::Isotropic::Sigma(2, 1.5));
     }
 };
 
@@ -260,6 +278,48 @@ PoseOutput FactorGraphBackend::optimize() {
             }
         }
         impl_->next_idx = n_old - 1;
+
+        // Phase D: landmark sliding window 관리
+        // 1. pose index 0 제거 → landmark pose 참조 reindex
+        // 2. pose 0에서만 보인 landmark 제거
+        {
+            std::map<gtsam::Key, std::set<size_t>> new_lm_poses;
+            std::vector<gtsam::Key> lm_to_remove;
+            for (auto& [lm_key, pose_set] : impl_->lm_poses) {
+                pose_set.erase(0);  // pose 0 제거
+                std::set<size_t> shifted;
+                for (size_t idx : pose_set) {
+                    shifted.insert(idx - 1);
+                }
+                if (shifted.empty()) {
+                    lm_to_remove.push_back(lm_key);
+                } else {
+                    new_lm_poses[lm_key] = shifted;
+                }
+            }
+            impl_->lm_poses = new_lm_poses;
+            // 고아 landmark 제거 + track_to_landmark/saved_positions 업데이트
+            for (const auto& lm_key : lm_to_remove) {
+                impl_->lm_saved_positions.erase(lm_key);
+                for (auto it = impl_->track_to_landmark.begin();
+                     it != impl_->track_to_landmark.end();) {
+                    if (it->second == lm_key) {
+                        it = impl_->track_to_landmark.erase(it);
+                    } else {
+                        ++it;
+                    }
+                }
+            }
+            // 살아남은 landmark: optimized 결과로 위치 갱신 (initial에는 넣지 않음)
+            // 기존 saved_positions 중 old_result에 있는 것은 최적화 결과로 업데이트
+            for (auto& [lm_key, pose_set] : impl_->lm_poses) {
+                if (old_result.exists(lm_key)) {
+                    impl_->lm_saved_positions[lm_key] = old_result.at<gtsam::Point3>(lm_key);
+                }
+                // old_result에 없으면 기존 saved_positions 유지 (registered-only landmark)
+            }
+        }
+
         // Phase 3: sliding 후 v/b 노드 전부 drop (unconstrained 방지).
         // 새 앵커(node 0)에만 v/b prior 추가. 나머지는 addImuFactor()가 필요 시 생성.
         {
@@ -572,6 +632,98 @@ bool FactorGraphBackend::detectZeroMotion(const std::vector<ImuData>& imu_sample
     return (gyro_avg < gyro_threshold) && (acc_var < accel_var_threshold);
 }
 
+void FactorGraphBackend::setCameraCalibration(double fx, double fy, double cx, double cy) {
+    // 3D points in m → pixel projection. Cal3_S2(fx, fy, skew, cx, cy)
+    impl_->camera_calib = boost::make_shared<gtsam::Cal3_S2>(fx, fy, 0.0, cx, cy);
+    auto logger = rclcpp::get_logger("factor_graph");
+    RCLCPP_INFO(logger, "BA camera calibration set: fx=%.1f fy=%.1f cx=%.1f cy=%.1f",
+                fx, fy, cx, cy);
+}
+
+void FactorGraphBackend::addReprojectionFactors(
+    size_t pose_idx,
+    const std::vector<int>& track_ids,
+    const std::vector<cv::Point2f>& pixels,
+    const std::vector<cv::Point3f>& points_3d_cam) {
+    if (!impl_->camera_calib) return;
+    if (track_ids.empty() || pixels.empty() || points_3d_cam.empty()) return;
+
+    gtsam::Key pose_key = gtsam::Symbol('x', static_cast<gtsam::Key>(pose_idx));
+    if (!impl_->initial.exists(pose_key)) return;
+
+    gtsam::Pose3 pose = impl_->initial.at<gtsam::Pose3>(pose_key);
+    int added = 0;
+    int registered = 0;
+    static constexpr size_t kMaxActiveLandmarks = 100;
+
+    size_t n = std::min({track_ids.size(), pixels.size(), points_3d_cam.size()});
+    for (size_t i = 0; i < n; ++i) {
+        int tid = track_ids[i];
+        gtsam::Point3 p_cam(
+            static_cast<double>(points_3d_cam[i].x) / 1000.0,
+            static_cast<double>(points_3d_cam[i].y) / 1000.0,
+            static_cast<double>(points_3d_cam[i].z) / 1000.0);
+
+        if (p_cam.z() < 0.05 || p_cam.z() > 20.0) continue;
+
+        auto it = impl_->track_to_landmark.find(tid);
+        if (it == impl_->track_to_landmark.end()) {
+            // 첫 관측: 위치만 기록, factor/initial에 넣지 않음 (single-obs → unconstrained)
+            gtsam::Point3 p_world = pose.transformFrom(p_cam);
+            gtsam::Key lm_key = gtsam::Symbol('l', static_cast<gtsam::Key>(impl_->next_lm_id++));
+            impl_->track_to_landmark[tid] = lm_key;
+            impl_->lm_saved_positions[lm_key] = p_world;
+            impl_->lm_poses[lm_key].insert(pose_idx);
+            registered++;
+            continue;
+        }
+
+        // ≥2번째 관측: 이제 multi-view constraint → factor 추가
+        gtsam::Key lm_key = it->second;
+
+        // Active landmark 수 제한 (이미 initial에 있는 건 통과)
+        if (!impl_->initial.exists(lm_key)) {
+            // 아직 initial에 없는 landmark → 활성화 대상
+            size_t active_count = 0;
+            for (auto& [k, _] : impl_->lm_poses) {
+                if (impl_->initial.exists(k)) active_count++;
+            }
+            if (active_count >= kMaxActiveLandmarks) continue;
+
+            // saved positions에서 복원
+            auto sit = impl_->lm_saved_positions.find(lm_key);
+            if (sit != impl_->lm_saved_positions.end()) {
+                impl_->initial.insert(lm_key, sit->second);
+                impl_->lm_saved_positions.erase(sit);
+            } else {
+                gtsam::Point3 p_world = pose.transformFrom(p_cam);
+                impl_->initial.insert(lm_key, p_world);
+            }
+        }
+
+        gtsam::Point2 pixel(static_cast<double>(pixels[i].x),
+                            static_cast<double>(pixels[i].y));
+        try {
+            impl_->graph.add(
+                gtsam::GenericProjectionFactor<gtsam::Pose3, gtsam::Point3, gtsam::Cal3_S2>(
+                    pixel, impl_->reproj_noise, pose_key, lm_key,
+                    impl_->camera_calib, false, false));
+            impl_->lm_poses[lm_key].insert(pose_idx);
+            added++;
+        } catch (...) {
+            // cheirality exception → skip
+        }
+    }
+
+    if (added > 0 || registered > 0) {
+        auto logger = rclcpp::get_logger("factor_graph");
+        static auto clock = std::make_shared<rclcpp::Clock>(RCL_STEADY_TIME);
+        RCLCPP_INFO_THROTTLE(logger, *clock, 3000,
+            "BA: %d reproj factors (new_reg=%d) at pose %zu, active_lm=%zu",
+            added, registered, pose_idx, impl_->track_to_landmark.size());
+    }
+}
+
 void FactorGraphBackend::reset() {
     impl_->graph.resize(0);
     impl_->initial.clear();
@@ -579,6 +731,151 @@ void FactorGraphBackend::reset() {
     impl_->has_imu_factors = false;
     impl_->prev_velocity = gtsam::Vector3(0, 0, 0);
     impl_->prev_bias = gtsam::imuBias::ConstantBias();
+    impl_->track_to_landmark.clear();
+    impl_->lm_poses.clear();
+    impl_->lm_saved_positions.clear();
+}
+
+cv::Mat FactorGraphBackend::motionOnlyBA(
+    const cv::Mat& T_world_cam,
+    const std::vector<cv::Point3f>& world_points,
+    const std::vector<cv::Point2f>& pixels,
+    int& out_inliers,
+    const std::vector<int>& octaves) const {
+    // ORB-SLAM3 Optimizer::PoseOptimization (GTSAM 버전)
+    // - Optical frame 직접 동작
+    // - Pyramid level별 information matrix (ORB-SLAM3 핵심)
+    // - 4라운드 × 10 iters, Huber on/off, chi2 outlier rejection
+
+    out_inliers = 0;
+    cv::Mat result = T_world_cam.clone();
+    if (!impl_->camera_calib) return result;
+    size_t n = std::min(world_points.size(), pixels.size());
+    if (n < 10) return result;
+
+    auto logger = rclcpp::get_logger("factor_graph");
+    const double chi2_threshold = 5.991;  // 2DOF chi2 at p=0.05
+
+    // ORB-SLAM3: pyramid scale factors → invSigma2
+    // scaleFactor=1.2, nLevels=8: sigma2[i] = 1.2^(2*i)
+    const double scale_factor = 1.2;
+    const int max_levels = 8;
+    std::vector<double> inv_sigma2(max_levels);
+    for (int i = 0; i < max_levels; ++i) {
+        double scale = std::pow(scale_factor, i);
+        inv_sigma2[i] = 1.0 / (scale * scale);
+    }
+
+    // T_world_cam → GTSAM Pose3 (m)
+    cv::Mat R_wc = T_world_cam(cv::Rect(0,0,3,3));
+    gtsam::Rot3 rot(
+        R_wc.at<double>(0,0), R_wc.at<double>(0,1), R_wc.at<double>(0,2),
+        R_wc.at<double>(1,0), R_wc.at<double>(1,1), R_wc.at<double>(1,2),
+        R_wc.at<double>(2,0), R_wc.at<double>(2,1), R_wc.at<double>(2,2));
+    gtsam::Point3 trans(
+        T_world_cam.at<double>(0,3) / 1000.0,
+        T_world_cam.at<double>(1,3) / 1000.0,
+        T_world_cam.at<double>(2,3) / 1000.0);
+    gtsam::Pose3 pose_guess(rot, trans);
+
+    // Observations 수집
+    struct Obs { gtsam::Point3 pw; gtsam::Point2 px; double invSigma2; };
+    std::vector<Obs> obs;
+    obs.reserve(n);
+    for (size_t i = 0; i < n; ++i) {
+        gtsam::Point3 pw(world_points[i].x / 1000.0,
+                         world_points[i].y / 1000.0,
+                         world_points[i].z / 1000.0);
+        gtsam::Point3 pc = pose_guess.transformTo(pw);
+        if (pc.z() < 0.05 || pc.z() > 20.0) continue;
+        // ORB-SLAM3: invSigma2 from pyramid octave
+        int oct = (!octaves.empty() && i < octaves.size()) ? octaves[i] : 0;
+        oct = std::max(0, std::min(oct, max_levels - 1));
+        obs.push_back({pw, {static_cast<double>(pixels[i].x),
+                            static_cast<double>(pixels[i].y)}, inv_sigma2[oct]});
+    }
+    if (obs.size() < 10) return result;
+
+    std::vector<bool> is_outlier(obs.size(), false);
+    gtsam::Pose3 optimized_pose = pose_guess;
+
+    for (int round = 0; round < 4; ++round) {
+        gtsam::NonlinearFactorGraph graph;
+        gtsam::Values values;
+        gtsam::Key pk = gtsam::Symbol('x', 0);
+        values.insert(pk, optimized_pose);
+
+        int ne = 0;
+        for (size_t i = 0; i < obs.size(); ++i) {
+            if (is_outlier[i]) continue;
+            gtsam::Key lk = gtsam::Symbol('l', static_cast<gtsam::Key>(i));
+            values.insert(lk, obs[i].pw);
+            graph.add(gtsam::PriorFactor<gtsam::Point3>(
+                lk, obs[i].pw, gtsam::noiseModel::Isotropic::Sigma(3, 0.0001)));
+
+            // ORB-SLAM3: information = Identity * invSigma2 → sigma = 1/sqrt(invSigma2)
+            double sigma = 1.0 / std::sqrt(obs[i].invSigma2);
+            gtsam::SharedNoiseModel noise;
+            if (round < 2) {
+                noise = gtsam::noiseModel::Robust::Create(
+                    gtsam::noiseModel::mEstimator::Huber::Create(std::sqrt(chi2_threshold)),
+                    gtsam::noiseModel::Isotropic::Sigma(2, sigma));
+            } else {
+                noise = gtsam::noiseModel::Isotropic::Sigma(2, sigma);
+            }
+
+            try {
+                graph.add(gtsam::GenericProjectionFactor<gtsam::Pose3, gtsam::Point3, gtsam::Cal3_S2>(
+                    obs[i].px, noise, pk, lk, impl_->camera_calib, false, false));
+                ne++;
+            } catch (...) { is_outlier[i] = true; }
+        }
+        if (ne < 10) break;
+
+        try {
+            gtsam::LevenbergMarquardtParams p;
+            p.setMaxIterations(10);
+            gtsam::LevenbergMarquardtOptimizer opt(graph, values, p);
+            auto r = opt.optimize();
+            if (r.exists(pk)) optimized_pose = r.at<gtsam::Pose3>(pk);
+        } catch (...) { break; }
+
+        // ORB-SLAM3: invSigma2 * err_sq > chi2 → outlier
+        for (size_t i = 0; i < obs.size(); ++i) {
+            if (is_outlier[i]) continue;
+            try {
+                gtsam::Point3 pc = optimized_pose.transformTo(obs[i].pw);
+                if (pc.z() <= 0.0) { is_outlier[i] = true; continue; }
+                gtsam::Point2 proj = impl_->camera_calib->uncalibrate(
+                    gtsam::PinholeBase::Project(pc));
+                double err_sq = (proj - obs[i].px).squaredNorm();
+                if (obs[i].invSigma2 * err_sq > chi2_threshold)
+                    is_outlier[i] = true;
+            } catch (...) { is_outlier[i] = true; }
+        }
+    }
+
+    int ni = 0;
+    for (size_t i = 0; i < obs.size(); ++i) if (!is_outlier[i]) ni++;
+    out_inliers = ni;
+
+    if (ni >= 10) {
+        gtsam::Matrix3 R_opt = optimized_pose.rotation().matrix();
+        gtsam::Vector3 t_opt = optimized_pose.translation();
+        result = cv::Mat::eye(4, 4, CV_64F);
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                result.at<double>(r, c) = R_opt(r, c);
+        result.at<double>(0, 3) = t_opt(0) * 1000.0;
+        result.at<double>(1, 3) = t_opt(1) * 1000.0;
+        result.at<double>(2, 3) = t_opt(2) * 1000.0;
+
+        static auto clock = std::make_shared<rclcpp::Clock>(RCL_STEADY_TIME);
+        RCLCPP_INFO_THROTTLE(logger, *clock, 3000,
+            "Motion-only BA: %d/%zu inliers (4-round)", ni, obs.size());
+    }
+
+    return result;
 }
 
 bool FactorGraphBackend::runVerification() {
