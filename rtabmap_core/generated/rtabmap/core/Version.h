@@ -8,12 +8,9 @@
 #define RTABMAP_VERSION_COMPARE(major, minor, patch) \
   (major>=0 || (major==0 && minor>=21) || (major==0 && minor==21 && patch>=4))
 
-#define RTABMAP_TORO
 #define RTABMAP_GTSAM
 #define RTABMAP_VERTIGO
-#define RTABMAP_OCTOMAP
 #define RTABMAP_ZED
-#define RTABMAP_MADGWICK
 
 #include <pcl/pcl_config.h>
 #if PCL_VERSION_COMPARE(>, 1, 11, 1)

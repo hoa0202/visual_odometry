@@ -57,7 +57,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "rtabmap/core/Compression.h"
 #include "rtabmap/core/Graph.h"
 #include "rtabmap/core/Stereo.h"
-#include "rtabmap/core/optimizer/OptimizerG2O.h"
+#include "rtabmap/core/Optimizer.h"
 #include <pcl/io/pcd_io.h>
 #include <pcl/common/common.h>
 #include <rtabmap/core/MarkerDetector.h>
@@ -3097,10 +3097,11 @@ Transform Memory::computeTransform(
 				// set root negative to fix all other poses
 				std::set<int> sbaOutliers;
 				UTimer bundleTimer;
-				OptimizerG2O sba(parameters_);
-				sba.setIterations(5);
+				Optimizer* sba = Optimizer::create(Optimizer::kTypeGTSAM, parameters_);
+				sba->setIterations(5);
 				UTimer bundleTime;
-				bundlePoses = sba.optimizeBA(-toS.id(), bundlePoses, bundleLinks, bundleModels, points3DMap, wordReferences, &sbaOutliers);
+				bundlePoses = sba->optimizeBA(-toS.id(), bundlePoses, bundleLinks, bundleModels, points3DMap, wordReferences, &sbaOutliers);
+				delete sba;
 				UDEBUG("sba...end");
 
 				UDEBUG("bundleTime=%fs (poses=%d wordRef=%d outliers=%d)", bundleTime.ticks(), (int)bundlePoses.size(), totalWordReferences, (int)sbaOutliers.size());

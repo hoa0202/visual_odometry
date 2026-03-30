@@ -44,8 +44,6 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <queue>
 #include <fstream>
 
-#include <rtabmap/core/optimizer/OptimizerTORO.h>
-#include <rtabmap/core/optimizer/OptimizerG2O.h>
 
 namespace rtabmap {
 
@@ -61,25 +59,11 @@ bool exportPoses(
 {
 	UDEBUG("%s", filePath.c_str());
 	std::string tmpPath = filePath;
-	if(format==3) // TORO
+	if(format==3 || format==4)
 	{
-		if(UFile::getExtension(tmpPath).empty())
-		{
-			tmpPath+=".graph";
-		}
-		OptimizerTORO toro(parameters);
-		return toro.saveGraph(tmpPath, poses, constraints);
+		UWARN("TORO/g2o export formats not available in this build.");
+		return false;
 	}
-	else if(format == 4) // g2o
-	{
-		if(UFile::getExtension(tmpPath).empty())
-		{
-			tmpPath+=".g2o";
-		}
-		OptimizerG2O g2o(parameters);
-		return g2o.saveGraph(tmpPath, poses, constraints);
-	}
-	else
 	{
 		if(UFile::getExtension(tmpPath).empty())
 		{
@@ -189,26 +173,11 @@ bool importPoses(
 		std::map<int, double> * stamps) // optional for format 1 and 9
 {
 	UDEBUG("%s format=%d", filePath.c_str(), format);
-	if(format==3) // TORO
+	if(format==3 || format==4)
 	{
-		std::multimap<int, Link> constraintsTmp;
-		if(OptimizerTORO::loadGraph(filePath, poses, constraintsTmp))
-		{
-			if(constraints)
-			{
-				*constraints = constraintsTmp;
-			}
-			return true;
-		}
+		UWARN("TORO/g2o import formats not available in this build.");
 		return false;
 	}
-	else if(format == 4) // g2o
-	{
-		std::multimap<int, Link> constraintsTmp;
-		UERROR("Cannot import from g2o format because it is not yet supported!");
-		return false;
-	}
-	else
 	{
 		std::ifstream file;
 		file.open(filePath.c_str(), std::ifstream::in);

@@ -27,18 +27,6 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "rtabmap/core/Odometry.h"
 #include <rtabmap/core/odometry/OdometryF2M.h>
-#include "rtabmap/core/odometry/OdometryF2F.h"
-#include "rtabmap/core/odometry/OdometryFovis.h"
-#include "rtabmap/core/odometry/OdometryViso2.h"
-#include "rtabmap/core/odometry/OdometryDVO.h"
-#include "rtabmap/core/odometry/OdometryOkvis.h"
-#include "rtabmap/core/odometry/OdometryORBSLAM3.h"
-#include "rtabmap/core/odometry/OdometryLOAM.h"
-#include "rtabmap/core/odometry/OdometryFLOAM.h"
-#include "rtabmap/core/odometry/OdometryMSCKF.h"
-#include "rtabmap/core/odometry/OdometryVINS.h"
-#include "rtabmap/core/odometry/OdometryOpenVINS.h"
-#include "rtabmap/core/odometry/OdometryOpen3D.h"
 #include "rtabmap/core/OdometryInfo.h"
 #include "rtabmap/core/util3d.h"
 #include "rtabmap/core/util3d_mapping.h"
@@ -51,7 +39,6 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "rtabmap/core/util2d.h"
 
 #include <pcl/pcl_base.h>
-#include <rtabmap/core/odometry/OdometryORBSLAM2.h>
 
 namespace rtabmap {
 
@@ -72,48 +59,8 @@ Odometry * Odometry::create(Odometry::Type & type, const ParametersMap & paramet
 	case Odometry::kTypeF2M:
 		odometry = new OdometryF2M(parameters);
 		break;
-	case Odometry::kTypeF2F:
-		odometry = new OdometryF2F(parameters);
-		break;
-	case Odometry::kTypeFovis:
-		odometry = new OdometryFovis(parameters);
-		break;
-	case Odometry::kTypeViso2:
-		odometry = new OdometryViso2(parameters);
-		break;
-	case Odometry::kTypeDVO:
-		odometry = new OdometryDVO(parameters);
-		break;
-	case Odometry::kTypeORBSLAM:
-#if defined(RTABMAP_ORB_SLAM) and RTABMAP_ORB_SLAM == 2
-		odometry = new OdometryORBSLAM(parameters);
-#else
-		odometry = new OdometryORBSLAM3(parameters);
-#endif
-		break;
-	case Odometry::kTypeOkvis:
-		odometry = new OdometryOkvis(parameters);
-		break;
-	case Odometry::kTypeLOAM:
-		odometry = new OdometryLOAM(parameters);
-		break;
-	case Odometry::kTypeFLOAM:
-		odometry = new OdometryFLOAM(parameters);
-		break;
-	case Odometry::kTypeMSCKF:
-		odometry = new OdometryMSCKF(parameters);
-		break;
-	case Odometry::kTypeVINS:
-		odometry = new OdometryVINS(parameters);
-		break;
-	case Odometry::kTypeOpenVINS:
-		odometry = new OdometryOpenVINS(parameters);
-		break;
-	case Odometry::kTypeOpen3D:
-		odometry = new OdometryOpen3D(parameters);
-		break;
 	default:
-		UERROR("Unknown odometry type %d, using F2M instead...", (int)type);
+		UWARN("Only F2M odometry is available in this build, using F2M.");
 		odometry = new OdometryF2M(parameters);
 		type = Odometry::kTypeF2M;
 		break;

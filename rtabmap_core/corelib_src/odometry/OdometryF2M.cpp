@@ -100,18 +100,14 @@ OdometryF2M::OdometryF2M(const ParametersMap & parameters) :
 	ParametersMap bundleParameters = parameters;
 	if(bundleAdjustment_ > 0)
 	{
-		if((bundleAdjustment_==1 && Optimizer::isAvailable(Optimizer::kTypeG2O)) ||
-		(bundleAdjustment_==2 && Optimizer::isAvailable(Optimizer::kTypeCVSBA)) ||
-		(bundleAdjustment_==3 && Optimizer::isAvailable(Optimizer::kTypeCeres)))
+		if(Optimizer::isAvailable(Optimizer::kTypeGTSAM))
 		{
-			// disable bundle in RegistrationVis as we do it already here
 			uInsert(bundleParameters, ParametersPair(Parameters::kVisBundleAdjustment(), "0"));
-			sba_ = Optimizer::create(bundleAdjustment_==3?Optimizer::kTypeCeres:bundleAdjustment_==2?Optimizer::kTypeCVSBA:Optimizer::kTypeG2O, bundleParameters);
+			sba_ = Optimizer::create(Optimizer::kTypeGTSAM, bundleParameters);
 		}
 		else
 		{
-			UWARN("Selected bundle adjustment approach (\"%s\"=\"%d\") is not available, "
-					"local bundle adjustment is then disabled.", Parameters::kOdomF2MBundleAdjustment().c_str(), bundleAdjustment_);
+			UWARN("GTSAM optimizer not available, local bundle adjustment is then disabled.");
 			bundleAdjustment_ = 0;
 		}
 	}
